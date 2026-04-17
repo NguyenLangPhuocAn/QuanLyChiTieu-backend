@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model admin_logs {
+  id         Int       @id @default(autoincrement())
+  admin_id   Int?
+  action     String?   @db.Text
+  created_at DateTime? @default(now()) @db.Timestamp(0)
+
+  @@index([admin_id], map: "admin_id")
+}
+
+model ai_chat_history {
+  id         Int                   @id @default(autoincrement())
+  session_id Int?
+  user_id    Int?
+  role       ai_chat_history_role?
+  message    String?               @db.Text
+  context    String?               @db.Text
+  created_at DateTime?             @default(now()) @db.Timestamp(0)
+
+  @@index([session_id], map: "session_id")
+  @@index([user_id], map: "user_id")
+}
+
+model categories {
+  id        Int             @id @default(autoincrement())
+  name      String          @db.VarChar(50)
+  type      categories_type
+  icon      String?         @db.VarChar(50)
+  is_system Boolean?        @default(true)
+  user_id   Int?
+
+  @@index([user_id], map: "user_id")
+}
+
+model chat_sessions {
+  id         Int       @id @default(autoincrement())
+  user_id    Int?
+  created_at DateTime? @default(now()) @db.Timestamp(0)
+
+  @@index([user_id], map: "user_id")
+}
+
+model password_resets {
+  id         Int       @id @default(autoincrement())
+  email      String?   @db.VarChar(255)
+  token      String?   @db.VarChar(255)
+  expired_at DateTime? @db.DateTime(0)
+}
+
+model tags {
+  id      Int    @id @default(autoincrement())
+  name    String @db.VarChar(50)
+  user_id Int?
+
+  @@unique([name, user_id], map: "name")
+  @@index([user_id], map: "user_id")
+}
+
+model transaction_tags {
+  transaction_id Int
+  tag_id         Int
+
+  @@id([transaction_id, tag_id])
+  @@index([tag_id], map: "tag_id")
+}
+
+model transactions {
+  id               Int       @id @default(autoincrement())
+  wallet_id        Int?
+  category_id      Int?
+  amount           Decimal   @db.Decimal(15, 2)
+  note             String?   @db.Text
+  receipt_image    String?   @db.Text
+  transaction_date DateTime  @db.DateTime(0)
+  created_at       DateTime? @default(now()) @db.Timestamp(0)
+
+  @@index([category_id], map: "category_id")
+  @@index([wallet_id], map: "wallet_id")
+}
+
+model users {
+  id               Int         @id @default(autoincrement())
+  email            String      @unique(map: "email") @db.VarChar(255)
+  password         String      @db.VarChar(255)
+  full_name        String?     @db.VarChar(100)
+  birthday         DateTime?   @db.Date
+  phone            String?     @db.VarChar(15)
+  address          String?     @db.Text
+  avatar           String?     @db.VarChar(255)
+  role             users_role? @default(BASIC)
+  currency_default String?     @default("VND") @db.VarChar(10)
+  provider         String?     @default("local") @db.VarChar(50)
+  provider_id      String?     @db.VarChar(255)
+  is_active        Boolean?    @default(true)
+  created_at       DateTime?   @default(now()) @db.Timestamp(0)
+}
+
+model wallets {
+  id           Int       @id @default(autoincrement())
+  user_id      Int?
+  name         String    @db.VarChar(50)
+  balance      Decimal?  @default(0.00) @db.Decimal(15, 2)
+  budget_limit Decimal?  @db.Decimal(15, 2)
+  created_at   DateTime? @default(now()) @db.Timestamp(0)
+
+  @@index([user_id], map: "user_id")
+}
+
+enum categories_type {
+  INCOME
+  EXPENSE
+}
+
+enum ai_chat_history_role {
+  user
+  assistant
+}
+
+enum users_role {
+  BASIC
+  PREMIUM
+  ADMIN
+}
