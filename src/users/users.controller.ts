@@ -9,6 +9,8 @@ import {
   UseGuards,
   Req,
   ParseIntPipe,
+  UseInterceptors,
+  UploadedFile,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { JwtGuard } from '../auth/jwt.guard';
@@ -17,6 +19,9 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { LoginDto } from './dto/login.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
 
 @Controller('users')
 export class UsersController {
@@ -50,6 +55,36 @@ export class UsersController {
   @Put('me')
   updateProfile(@Req() req: any, @Body() dto: UpdateUserDto) {
     return this.usersService.updateProfile(req.user.userId, dto);
+  }
+
+  // ================= UPLOAD AVATAR =================
+
+  @UseGuards(JwtGuard)
+  @Put('me/avatar')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './uploads',
+        filename: (req, file, cb) => {
+          const uniqueName = Date.now() + '-' + file.originalname;
+          cb(null, uniqueName);
+        },
+      }),
+      fileFilter: (req, file, cb) => {
+        if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
+          return cb(new Error('Chỉ cho phép file ảnh'), false);
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  uploadAvatar(
+    @Req() req: any,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    return this.usersService.updateProfile(req.user.userId, {
+      avatar: file.filename,
+    });
   }
 
   // ================= CHANGE PASSWORD =================

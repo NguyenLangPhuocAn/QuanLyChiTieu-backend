@@ -33,18 +33,23 @@ export class UsersService {
         id: true,
         email: true,
         role: true,
+        full_name: true,
+        phone: true,
+        birthday: true,
+        address: true,
+        avatar: true,
       },
     });
   }
 
   // ================= CREATE (REGISTER) =================
   async create(dto: CreateUserDto) {
-    // confirm password
+    // check confirm password
     if (dto.password !== dto.confirmPassword) {
       throw new BadRequestException('Mật khẩu xác nhận không khớp');
     }
 
-    // check email
+    // check email tồn tại
     const existingUser = await this.prisma.users.findUnique({
       where: { email: dto.email },
     });
@@ -70,7 +75,7 @@ export class UsersService {
     });
   }
 
-  // ================= UPDATE PROFILE =================
+  // ================= UPDATE (ADMIN) =================
   async update(id: number, dto: any) {
     const user = await this.prisma.users.findUnique({
       where: { id },
@@ -78,6 +83,16 @@ export class UsersService {
 
     if (!user) {
       throw new NotFoundException('User không tồn tại');
+    }
+
+    // ❗ nếu update password thì phải hash
+    if (dto.password) {
+      dto.password = await bcrypt.hash(dto.password, 10);
+    }
+
+    // ❗ convert date
+    if (dto.birthday) {
+      dto.birthday = new Date(dto.birthday);
     }
 
     return this.prisma.users.update({
@@ -148,12 +163,14 @@ export class UsersService {
       throw new NotFoundException('User không tồn tại');
     }
 
+    // check password cũ
     const isMatch = await bcrypt.compare(dto.oldPassword, user.password);
 
     if (!isMatch) {
       throw new UnauthorizedException('Mật khẩu cũ không đúng');
     }
 
+    // check confirm
     if (dto.newPassword !== dto.confirmPassword) {
       throw new BadRequestException('Mật khẩu xác nhận không khớp');
     }
@@ -171,30 +188,35 @@ export class UsersService {
       message: 'Đổi mật khẩu thành công',
     };
   }
-  async updateProfile(userId: number, dto: any) {
-  const user = await this.prisma.users.findUnique({
-    where: { id: userId },
-  });
 
-  if (!user) {
-    throw new NotFoundException('User không tồn tại');
-  }
-  if (dto.birthday) {
-    dto.birthday = new Date(dto.birthday);
-  }
-  return this.prisma.users.update({
-    where: { id: userId },
-    data: dto,
-    select: {
-      id: true,
-      email: true,
-      role: true,
-      full_name: true,
-      phone: true,
-      birthday: true,
-      address: true,
-      avatar: true,
-    },
-  });
+  // ================= UPDATE PROFILE =================
+  async updateProfile(userId: number, dto: any) {
+    const user = await this.prisma.users.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User không tồn tại');
+    }
+
+    // convert birthday
+    if (dto.birthday) {
+      dto.birthday = new Date(dto.birthday);
+    }
+
+    return this.prisma.users.update({
+      where: { id: userId },
+      data: dto,
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        full_name: true,
+        phone: true,
+        birthday: true,
+        address: true,
+        avatar: true,
+      },
+    });
   }
 }
