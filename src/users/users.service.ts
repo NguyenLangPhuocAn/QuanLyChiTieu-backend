@@ -106,6 +106,32 @@ export class UsersService {
     });
   }
 
+  // ================= UPDATE AVATAR (ADMIN) =================
+  async updateAvatar(id: number, avatar: string) {
+    const user = await this.prisma.users.findUnique({
+      where: { id },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User khÃ´ng tá»“n táº¡i');
+    }
+
+    return this.prisma.users.update({
+      where: { id },
+      data: { avatar },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        full_name: true,
+        phone: true,
+        birthday: true,
+        address: true,
+        avatar: true,
+      },
+    });
+  }
+
   // ================= DELETE =================
   async remove(id: number) {
     const user = await this.prisma.users.findUnique({

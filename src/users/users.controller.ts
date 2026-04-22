@@ -87,6 +87,32 @@ export class UsersController {
     });
   }
 
+  @UseGuards(JwtGuard, AdminGuard)
+  @Put('detail/:id/avatar')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: './uploads',
+        filename: (req, file, cb) => {
+          const uniqueName = Date.now() + '-' + file.originalname;
+          cb(null, uniqueName);
+        },
+      }),
+      fileFilter: (req, file, cb) => {
+        if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
+          return cb(new Error('Chá»‰ cho phÃ©p file áº£nh'), false);
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  uploadAvatarByAdmin(
+    @Param('id', ParseIntPipe) id: number,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    return this.usersService.updateAvatar(id, file.filename);
+  }
+
   // ================= CHANGE PASSWORD =================
 
   @UseGuards(JwtGuard)

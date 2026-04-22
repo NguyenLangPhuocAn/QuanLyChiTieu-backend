@@ -1,4 +1,11 @@
-import { IsEnum, IsNotEmpty, IsString, MaxLength } from 'class-validator';
+import {
+  IsEnum,
+  IsNotEmpty,
+  IsString,
+  MaxLength,
+  IsOptional,
+  IsBoolean,
+} from 'class-validator';
 
 export enum CategoryType {
   INCOME = 'INCOME',
@@ -10,9 +17,14 @@ export class CreateCategoryDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(50)
-  name: string;
+  name!: string;
 
   // loại
   @IsEnum(CategoryType)
-  type: CategoryType;
+  type!: CategoryType;
+
+  // chỉ admin dùng
+  @IsOptional()
+  @IsBoolean()
+  is_system?: boolean;
 }

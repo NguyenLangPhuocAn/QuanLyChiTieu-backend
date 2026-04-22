@@ -17,26 +17,43 @@ export class CategoriesService {
       where: { id: userId },
     });
 
-    // BASIC không được tạo
     if (user?.role === 'BASIC') {
       throw new ForbiddenException('Không có quyền tạo category');
     }
 
+    const name = dto.name.trim().toLowerCase();
+
+    // check trùng
+    const existed = await this.prisma.categories.findFirst({
+      where: {
+        name,
+        user_id: userId,
+      },
+    });
+
+    if (existed) {
+      throw new ForbiddenException('Danh mục đã tồn tại');
+    }
+
+    const isSystem =
+      user?.role === 'ADMIN' && dto.is_system === true;
+
     return this.prisma.categories.create({
       data: {
-        ...dto,
-        user_id: userId,
-        is_system: false,
+        name,
+        type: dto.type,
+        is_system: isSystem,
+        user_id: isSystem ? null : userId,
       },
     });
   }
+
   // ================= GET ALL =================
   async findAll(userId: number) {
     const user = await this.prisma.users.findUnique({
       where: { id: userId },
     });
 
-    // BASIC → chỉ system
     if (user?.role === 'BASIC') {
       return this.prisma.categories.findMany({
         where: { is_system: true },
@@ -44,20 +61,15 @@ export class CategoriesService {
       });
     }
 
-    // PREMIUM → system + own
     if (user?.role === 'PREMIUM') {
       return this.prisma.categories.findMany({
         where: {
-          OR: [
-            { is_system: true },
-            { user_id: userId },
-          ],
+          OR: [{ is_system: true }, { user_id: userId }],
         },
         orderBy: { id: 'desc' },
       });
     }
 
-    // ADMIN → tất cả
     return this.prisma.categories.findMany({
       orderBy: { id: 'desc' },
     });
@@ -74,34 +86,59 @@ export class CategoriesService {
       throw new NotFoundException('Category không tồn tại');
     }
 
-    // ===== ADMIN: full quyền =====
+    // không cho update rỗng
+    if (!dto.name && !dto.type) {
+      throw new ForbiddenException('Không có dữ liệu để cập nhật');
+    }
+
+    const newName = dto.name?.trim().toLowerCase();
+
+    // ===== ADMIN =====
     if (user?.role === 'ADMIN') {
       return this.prisma.categories.update({
         where: { id },
-        data: dto,
+        data: {
+          name: newName ?? undefined,
+          type: dto.type,
+        },
       });
     }
 
-    // ===== BASIC: cấm =====
+    // ===== BASIC =====
     if (user?.role === 'BASIC') {
       throw new ForbiddenException('Không có quyền');
     }
 
     // ===== PREMIUM =====
-
-    // không sửa system
     if (category.is_system) {
       throw new ForbiddenException('Không thể sửa category hệ thống');
     }
 
-    // chỉ sửa của mình
     if (category.user_id !== userId) {
       throw new ForbiddenException('Không có quyền');
     }
 
+    // check trùng khi update
+    if (newName) {
+      const existed = await this.prisma.categories.findFirst({
+        where: {
+          name: newName,
+          user_id: userId,
+          NOT: { id },
+        },
+      });
+
+      if (existed) {
+        throw new ForbiddenException('Danh mục đã tồn tại');
+      }
+    }
+
     return this.prisma.categories.update({
       where: { id },
-      data: dto,
+      data: {
+        name: newName ?? undefined,
+        type: dto.type,
+      },
     });
   }
 
@@ -116,19 +153,15 @@ export class CategoriesService {
       throw new NotFoundException('Category không tồn tại');
     }
 
-    // ADMIN: full quyền
     if (user?.role === 'ADMIN') {
       return this.prisma.categories.delete({
         where: { id },
       });
     }
 
-    // BASIC: cấm
     if (user?.role === 'BASIC') {
       throw new ForbiddenException('Không có quyền');
     }
-
-    // PREMIUM
 
     if (category.is_system) {
       throw new ForbiddenException('Không thể xoá category hệ thống');
@@ -154,7 +187,6 @@ export class CategoriesService {
       throw new NotFoundException('Category không tồn tại');
     }
 
-    // ADMIN
     if (user?.role === 'ADMIN') {
       return this.prisma.categories.update({
         where: { id },
@@ -162,12 +194,9 @@ export class CategoriesService {
       });
     }
 
-    // BASIC
     if (user?.role === 'BASIC') {
       throw new ForbiddenException('Không có quyền');
     }
-
-    // PREMIUM
 
     if (category.is_system) {
       throw new ForbiddenException('Không thể sửa category hệ thống');

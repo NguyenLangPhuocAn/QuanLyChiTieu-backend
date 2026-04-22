@@ -10,6 +10,8 @@ import {
   UseGuards,
   UseInterceptors,
   UploadedFile,
+  BadRequestException,
+  ParseIntPipe,
 } from '@nestjs/common';
 import { CategoriesService } from './categories.service';
 import { JwtGuard } from '../auth/jwt.guard';
@@ -39,22 +41,25 @@ export class CategoriesController {
   @Put(':id')
   update(
     @Req() req: any,
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @Body() dto: UpdateCategoryDto,
   ) {
     return this.categoriesService.update(
       req.user.userId,
-      Number(id),
+      id,
       dto,
     );
   }
 
   // ================= DELETE =================
   @Delete(':id')
-  remove(@Req() req: any, @Param('id') id: string) {
+  remove(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
     return this.categoriesService.remove(
       req.user.userId,
-      Number(id),
+      id,
     );
   }
 
@@ -71,7 +76,7 @@ export class CategoriesController {
       }),
       fileFilter: (req, file, cb) => {
         if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
-          return cb(new Error('Chỉ cho phép file ảnh'), false);
+          return cb(new BadRequestException('Chỉ cho phép file ảnh'), false);
         }
         cb(null, true);
       },
@@ -79,12 +84,17 @@ export class CategoriesController {
   )
   uploadIcon(
     @Req() req: any,
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @UploadedFile() file: Express.Multer.File,
   ) {
+    // check không có file
+    if (!file) {
+      throw new BadRequestException('Vui lòng chọn file');
+    }
+
     return this.categoriesService.uploadIcon(
       req.user.userId,
-      Number(id),
+      id,
       file.filename,
     );
   }
