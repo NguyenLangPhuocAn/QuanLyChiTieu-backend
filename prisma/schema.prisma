@@ -20,7 +20,7 @@ model categories {
   id        Int             @id @default(autoincrement())
   name      String          @db.VarChar(50)
   type      categories_type
-  icon      String?         @db.VarChar(50)
+  icon      String?         @db.VarChar(255)
   is_system Boolean?        @default(true)
   user_id   Int?
 

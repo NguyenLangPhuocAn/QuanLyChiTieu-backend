@@ -1,4 +1,4 @@
-import {
+﻿import {
   Body,
   Controller,
   Delete,
@@ -13,89 +13,130 @@ import {
   BadRequestException,
   ParseIntPipe,
 } from '@nestjs/common';
+import type { Request } from 'express';
 import { CategoriesService } from './categories.service';
 import { JwtGuard } from '../auth/jwt.guard';
 import { CreateCategoryDto } from './dto/create-categories.dto';
 import { UpdateCategoryDto } from './dto/update-categories.dto';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
+import { memoryStorage } from 'multer';
+import { PrismaService } from '../prisma/prisma.service';
+
+type AuthenticatedRequest = Request & {
+  user: {
+    userId: number;
+    role?: string;
+  };
+};
 
 @Controller('categories')
 @UseGuards(JwtGuard)
 export class CategoriesController {
-  constructor(private categoriesService: CategoriesService) {}
+  constructor(
+    private categoriesService: CategoriesService,
+    private prisma: PrismaService,
+  ) {}
 
-  // ================= CREATE =================
-  @Post()
-  create(@Req() req: any, @Body() dto: CreateCategoryDto) {
-    return this.categoriesService.create(req.user.userId, dto);
+  private async logAction(req: AuthenticatedRequest, action: string) {
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: req.user.userId,
+        action,
+      },
+    });
   }
 
-  // ================= GET ALL =================
+  @Post()
+  async create(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: CreateCategoryDto,
+  ) {
+    const category = await this.categoriesService.create(req.user.userId, dto);
+
+    await this.logAction(
+      req,
+      `Tạo danh mục (id: ${category.id})`,
+    );
+
+    return category;
+  }
+
   @Get()
-  findAll(@Req() req: any) {
+  findAll(@Req() req: AuthenticatedRequest) {
     return this.categoriesService.findAll(req.user.userId);
   }
 
-  // ================= UPDATE =================
   @Put(':id')
-  update(
-    @Req() req: any,
+  async update(
+    @Req() req: AuthenticatedRequest,
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: UpdateCategoryDto,
   ) {
-    return this.categoriesService.update(
+    const category = await this.categoriesService.update(
       req.user.userId,
       id,
       dto,
     );
+
+    await this.logAction(
+      req,
+      `Cập nhật danh mục (id: ${id})`,
+    );
+
+    return category;
   }
 
-  // ================= DELETE =================
   @Delete(':id')
-  remove(
-    @Req() req: any,
+  async remove(
+    @Req() req: AuthenticatedRequest,
     @Param('id', ParseIntPipe) id: number,
   ) {
-    return this.categoriesService.remove(
-      req.user.userId,
-      id,
+    const category = await this.categoriesService.remove(req.user.userId, id);
+
+    await this.logAction(
+      req,
+      `Xóa danh mục (id: ${category.id})`,
     );
+
+    return category;
   }
 
-  // ================= UPLOAD ICON =================
   @Post(':id/icon')
   @UseInterceptors(
     FileInterceptor('file', {
-      storage: diskStorage({
-        destination: './uploads/categories',
-        filename: (req, file, cb) => {
-          const uniqueName = Date.now() + '-' + file.originalname;
-          cb(null, uniqueName);
-        },
-      }),
+      storage: memoryStorage(),
       fileFilter: (req, file, cb) => {
         if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
-          return cb(new BadRequestException('Chỉ cho phép file ảnh'), false);
+          return cb(
+            new BadRequestException('Chỉ cho phép tải lên tệp hình ảnh'),
+            false,
+          );
         }
+
         cb(null, true);
       },
     }),
   )
-  uploadIcon(
-    @Req() req: any,
+  async uploadIcon(
+    @Req() req: AuthenticatedRequest,
     @Param('id', ParseIntPipe) id: number,
     @UploadedFile() file: Express.Multer.File,
   ) {
-    // check không có file
     if (!file) {
-      throw new BadRequestException('Vui lòng chọn file');
+      throw new BadRequestException('Vui lòng chọn tệp');
     }
 
-    return this.categoriesService.uploadIcon(
+    const category = await this.categoriesService.uploadIcon(
       req.user.userId,
       id,
-      file.filename,
+      file,
     );
+
+    await this.logAction(
+      req,
+      `Upload icon danh mục (id: ${category.id})`,
+    );
+
+    return category;
   }
 }

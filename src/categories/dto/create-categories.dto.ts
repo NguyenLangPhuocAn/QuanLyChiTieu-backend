@@ -13,17 +13,17 @@ export enum CategoryType {
 }
 
 export class CreateCategoryDto {
-  // tên
+  // Tên danh mục hiển thị cho người dùng.
   @IsString()
   @IsNotEmpty()
   @MaxLength(50)
   name!: string;
 
-  // loại
+  // Loại danh mục quyết định giao dịch là khoản thu hay khoản chi.
   @IsEnum(CategoryType)
   type!: CategoryType;
 
-  // chỉ admin dùng
+  // Chỉ admin dùng để tạo danh mục hệ thống.
   @IsOptional()
   @IsBoolean()
   is_system?: boolean;

@@ -1,4 +1,4 @@
-import {
+﻿import {
   Controller,
   Get,
   Post,
@@ -12,6 +12,7 @@ import {
   UseInterceptors,
   UploadedFile,
 } from '@nestjs/common';
+import type { Request } from 'express';
 import { UsersService } from './users.service';
 import { JwtGuard } from '../auth/jwt.guard';
 import { AdminGuard } from '../auth/admin.guard';
@@ -22,69 +23,146 @@ import { UpdateUserDto } from './dto/update-user.dto';
 
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
+import { mkdirSync } from 'fs';
+import { extname, join } from 'path';
+import { PrismaService } from '../prisma/prisma.service';
+
+type AuthenticatedRequest = Request & {
+  // Sau khi qua JwtGuard, thông tin user đã giải mã sẽ được gắn vào req.user.
+  user: {
+    userId: number;
+    role?: string;
+  };
+};
+
+function generateUploadFilename(file: Express.Multer.File) {
+  // Giữ phần đuôi file gốc và thêm tiền tố unique để tránh trùng tên khi upload.
+  return `${Date.now()}-${Math.round(Math.random() * 1e9)}${extname(file.originalname)}`;
+}
+
+// Avatar của user được tách ra thư mục riêng thay vì dùng chung với các loại file khác.
+const userAvatarUploadDir = join(process.cwd(), 'uploads', 'avatars');
+
+function ensureUserAvatarUploadDir() {
+  // Tạo thư mục đích nếu chưa tồn tại để lần upload đầu tiên không bị lỗi.
+  mkdirSync(userAvatarUploadDir, { recursive: true });
+  return userAvatarUploadDir;
+}
 
 @Controller('users')
 export class UsersController {
-  constructor(private usersService: UsersService) {}
+  constructor(
+    private usersService: UsersService,
+    private prisma: PrismaService,
+  ) {}
 
-  // ================= AUTH =================
+  private getUserLogLabel(user: {
+    id?: number;
+    full_name?: string | null;
+    email?: string | null;
+  }) {
+    return user.full_name?.trim() || user.email?.trim() || `id: ${user.id}`;
+  }
+
+  private async logAdminAction(req: AuthenticatedRequest, action: string) {
+    if (req.user.role !== 'ADMIN') {
+      return;
+    }
+
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: req.user.userId,
+        action,
+      },
+    });
+  }
 
   @Post('login')
   login(@Body() dto: LoginDto) {
     return this.usersService.login(dto.email, dto.password);
   }
 
+  @UseGuards(JwtGuard)
   @Post('logout')
-  logout() {
+  async logout(@Req() req: AuthenticatedRequest) {
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: req.user.userId,
+        action: `Người dùng đăng xuất hệ thống (id: ${req.user.userId})`,
+      },
+    });
+
     return {
       message: 'Logout',
     };
   }
 
-  // ================= PROFILE =================
-
   @UseGuards(JwtGuard)
   @Get('me')
-  getProfile(@Req() req: any) {
+  getProfile(@Req() req: AuthenticatedRequest) {
     return this.usersService.findOne(req.user.userId);
   }
 
-  // ================= UPDATE PROFILE =================
-
   @UseGuards(JwtGuard)
   @Put('me')
-  updateProfile(@Req() req: any, @Body() dto: UpdateUserDto) {
-    return this.usersService.updateProfile(req.user.userId, dto);
-  }
+  async updateProfile(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: UpdateUserDto,
+  ) {
+    const user = await this.usersService.updateProfile(req.user.userId, dto);
 
-  // ================= UPLOAD AVATAR =================
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: req.user.userId,
+        action: `Cập nhật hồ sơ người dùng (id: ${req.user.userId})`,
+      },
+    });
+
+    return user;
+  }
 
   @UseGuards(JwtGuard)
   @Put('me/avatar')
   @UseInterceptors(
     FileInterceptor('file', {
       storage: diskStorage({
-        destination: './uploads',
+        // Mỗi lần upload đều resolve lại thư mục đích để chắc chắn folder đã sẵn sàng.
+        destination: (req, file, cb) => {
+          cb(null, ensureUserAvatarUploadDir());
+        },
         filename: (req, file, cb) => {
-          const uniqueName = Date.now() + '-' + file.originalname;
+          // Backend chỉ lưu tên file trong DB, còn đường dẫn public sẽ được ghép ở frontend.
+          const uniqueName = generateUploadFilename(file);
           cb(null, uniqueName);
         },
       }),
       fileFilter: (req, file, cb) => {
+        // Chỉ nhận các định dạng ảnh được hỗ trợ để tránh upload nhầm file khác.
         if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
-          return cb(new Error('Chỉ cho phép file ảnh'), false);
+          return cb(new Error('Chỉ cho phép tải lên tệp hình ảnh'), false);
         }
+
         cb(null, true);
       },
     }),
   )
-  uploadAvatar(
-    @Req() req: any,
+  async uploadAvatar(
+    @Req() req: AuthenticatedRequest,
     @UploadedFile() file: Express.Multer.File,
   ) {
-    return this.usersService.updateProfile(req.user.userId, {
+    // User tự đổi avatar của chính mình nên dùng userId lấy từ token.
+    const user = await this.usersService.updateProfile(req.user.userId, {
       avatar: file.filename,
     });
+
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: req.user.userId,
+        action: `Upload avatar người dùng (id: ${req.user.userId})`,
+      },
+    });
+
+    return user;
   }
 
   @UseGuards(JwtGuard, AdminGuard)
@@ -92,36 +170,59 @@ export class UsersController {
   @UseInterceptors(
     FileInterceptor('file', {
       storage: diskStorage({
-        destination: './uploads',
+        // Admin upload avatar cho user khác nhưng vẫn dùng cùng thư mục avatar riêng.
+        destination: (req, file, cb) => {
+          cb(null, ensureUserAvatarUploadDir());
+        },
         filename: (req, file, cb) => {
-          const uniqueName = Date.now() + '-' + file.originalname;
+          // Chuẩn hóa cách đặt tên để luồng admin và self-service dùng cùng format file.
+          const uniqueName = generateUploadFilename(file);
           cb(null, uniqueName);
         },
       }),
       fileFilter: (req, file, cb) => {
+        // Giữ cùng rule validate ảnh như endpoint me/avatar để hành vi đồng nhất.
         if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
-          return cb(new Error('Chá»‰ cho phÃ©p file áº£nh'), false);
+          return cb(new Error('Chỉ cho phép tải lên tệp hình ảnh'), false);
         }
+
         cb(null, true);
       },
     }),
   )
-  uploadAvatarByAdmin(
+  async uploadAvatarByAdmin(
+    @Req() req: AuthenticatedRequest,
     @Param('id', ParseIntPipe) id: number,
     @UploadedFile() file: Express.Multer.File,
   ) {
-    return this.usersService.updateAvatar(id, file.filename);
-  }
+    // Admin chỉ định user theo param id và cập nhật trường avatar bằng tên file mới.
+    const user = await this.usersService.updateAvatar(id, file.filename);
 
-  // ================= CHANGE PASSWORD =================
+    await this.logAdminAction(
+      req,
+      `Admin upload avatar người dùng (${this.getUserLogLabel(user)})`,
+    );
+
+    return user;
+  }
 
   @UseGuards(JwtGuard)
   @Put('change-password')
-  changePassword(@Req() req: any, @Body() dto: ChangePasswordDto) {
-    return this.usersService.changePassword(req.user.userId, dto);
-  }
+  async changePassword(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: ChangePasswordDto,
+  ) {
+    const result = await this.usersService.changePassword(req.user.userId, dto);
 
-  // ================= ADMIN =================
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: req.user.userId,
+        action: `Người dùng đổi mật khẩu (id: ${req.user.userId})`,
+      },
+    });
+
+    return result;
+  }
 
   @UseGuards(JwtGuard, AdminGuard)
   @Get()
@@ -129,14 +230,19 @@ export class UsersController {
     return this.usersService.findAll();
   }
 
-  // ================= REGISTER =================
-
   @Post()
-  create(@Body() dto: CreateUserDto) {
-    return this.usersService.create(dto);
-  }
+  async create(@Body() dto: CreateUserDto) {
+    const user = await this.usersService.create(dto);
 
-  // ================= CRUD (ADMIN ONLY) =================
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: user.id,
+        action: `Tạo người dùng (${this.getUserLogLabel(user)})`,
+      },
+    });
+
+    return user;
+  }
 
   @UseGuards(JwtGuard, AdminGuard)
   @Get('detail/:id')
@@ -146,13 +252,34 @@ export class UsersController {
 
   @UseGuards(JwtGuard, AdminGuard)
   @Put('detail/:id')
-  update(@Param('id', ParseIntPipe) id: number, @Body() body: any) {
-    return this.usersService.update(id, body);
+  async update(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: any,
+  ) {
+    const user = await this.usersService.update(id, body);
+
+    await this.logAdminAction(
+      req,
+      `Admin cập nhật người dùng (${this.getUserLogLabel(user)})`,
+    );
+
+    return user;
   }
 
   @UseGuards(JwtGuard, AdminGuard)
   @Delete('detail/:id')
-  remove(@Param('id', ParseIntPipe) id: number) {
-    return this.usersService.remove(id);
+  async remove(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    const user = await this.usersService.remove(id);
+
+    await this.logAdminAction(
+      req,
+      `Admin xóa người dùng (${this.getUserLogLabel(user)})`,
+    );
+
+    return user;
   }
 }

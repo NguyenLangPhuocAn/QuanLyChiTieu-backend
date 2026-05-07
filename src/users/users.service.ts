@@ -1,33 +1,77 @@
-import { Injectable } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import * as bcrypt from 'bcrypt';
 import * as jwt from 'jsonwebtoken';
 import { CreateUserDto } from './dto/create-user.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
-import {
-  BadRequestException,
-  UnauthorizedException,
-  NotFoundException,
-} from '@nestjs/common';
+
+type UserBase = {
+  id: number;
+  email: string;
+  role: string | null;
+  full_name?: string | null;
+  phone?: string | null;
+  birthday?: Date | null;
+  address?: string | null;
+  avatar?: string | null;
+  currency_default?: string | null;
+};
+
+type UserWithWalletCount = UserBase & {
+  wallet_count: number;
+};
 
 @Injectable()
 export class UsersService {
   constructor(private prisma: PrismaService) {}
 
+  // Lấy số lượng ví của một user để hiển thị trong trang quản lý người dùng.
+  private async getWalletCount(userId: number) {
+    return this.prisma.wallets.count({
+      where: { user_id: userId },
+    });
+  }
+
+  // Gắn thêm trường wallet_count vào dữ liệu user trước khi trả về cho frontend.
+  private async attachWalletCount<T extends UserBase>(user: T | null) {
+    if (!user) {
+      return null;
+    }
+
+    const wallet_count = await this.getWalletCount(user.id);
+
+    return {
+      ...user,
+      wallet_count,
+    } as T & { wallet_count: number };
+  }
+
+  // Gắn thêm wallet_count cho danh sách user.
+  private async attachWalletCountList<T extends UserBase>(users: T[]) {
+    return Promise.all(users.map((user) => this.attachWalletCount(user)));
+  }
+
   // ================= GET ALL =================
-  findAll() {
-    return this.prisma.users.findMany({
+  async findAll() {
+    const users = await this.prisma.users.findMany({
       select: {
         id: true,
         email: true,
         role: true,
       },
     });
+
+    return this.attachWalletCountList(users);
   }
 
   // ================= GET ONE =================
-  findOne(id: number) {
-    return this.prisma.users.findUnique({
+  async findOne(id: number) {
+    const user = await this.prisma.users.findUnique({
       where: { id },
       select: {
         id: true,
@@ -38,18 +82,21 @@ export class UsersService {
         birthday: true,
         address: true,
         avatar: true,
+        currency_default: true,
       },
     });
+
+    return this.attachWalletCount(user);
   }
 
   // ================= CREATE (REGISTER) =================
   async create(dto: CreateUserDto) {
-    // check confirm password
+    // Kiểm tra mật khẩu và xác nhận mật khẩu có khớp nhau không.
     if (dto.password !== dto.confirmPassword) {
       throw new BadRequestException('Mật khẩu xác nhận không khớp');
     }
 
-    // check email tồn tại
+    // Kiểm tra email đã tồn tại hay chưa.
     const existingUser = await this.prisma.users.findUnique({
       where: { email: dto.email },
     });
@@ -58,7 +105,7 @@ export class UsersService {
       throw new BadRequestException('Email đã tồn tại');
     }
 
-    // hash password
+    // Mã hóa mật khẩu trước khi lưu xuống database.
     const hashedPassword = await bcrypt.hash(dto.password, 10);
 
     return this.prisma.users.create({
@@ -82,28 +129,34 @@ export class UsersService {
     });
 
     if (!user) {
-      throw new NotFoundException('User không tồn tại');
+      throw new NotFoundException('Người dùng không tồn tại');
     }
 
-    // ❗ nếu update password thì phải hash
+    // Nếu cập nhật mật khẩu thì phải băm lại trước khi lưu.
     if (dto.password) {
       dto.password = await bcrypt.hash(dto.password, 10);
     }
 
-    // ❗ convert date
+    // Chuyển ngày sinh từ chuỗi sang Date nếu có gửi lên.
     if (dto.birthday) {
       dto.birthday = new Date(dto.birthday);
     }
 
-    return this.prisma.users.update({
+    const updatedUser = await this.prisma.users.update({
       where: { id },
       data: dto,
       select: {
         id: true,
         email: true,
         role: true,
+        full_name: true,
       },
     });
+
+    return {
+      ...updatedUser,
+      wallet_count: await this.getWalletCount(id),
+    };
   }
 
   // ================= UPDATE AVATAR (ADMIN) =================
@@ -113,10 +166,10 @@ export class UsersService {
     });
 
     if (!user) {
-      throw new NotFoundException('User khÃ´ng tá»“n táº¡i');
+      throw new NotFoundException('Người dùng không tồn tại');
     }
 
-    return this.prisma.users.update({
+    const updatedUser = await this.prisma.users.update({
       where: { id },
       data: { avatar },
       select: {
@@ -128,8 +181,14 @@ export class UsersService {
         birthday: true,
         address: true,
         avatar: true,
+        currency_default: true,
       },
     });
+
+    return {
+      ...updatedUser,
+      wallet_count: await this.getWalletCount(id),
+    };
   }
 
   // ================= DELETE =================
@@ -139,7 +198,7 @@ export class UsersService {
     });
 
     if (!user) {
-      throw new NotFoundException('User không tồn tại');
+      throw new NotFoundException('Người dùng không tồn tại');
     }
 
     return this.prisma.users.delete({
@@ -173,8 +232,15 @@ export class UsersService {
       { expiresIn: '1d' },
     );
 
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: user.id,
+        action: 'Người dùng đăng nhập hệ thống',
+      },
+    });
+
     return {
-      message: 'Login success',
+      message: 'Đăng nhập thành công',
       token,
     };
   }
@@ -186,17 +252,17 @@ export class UsersService {
     });
 
     if (!user) {
-      throw new NotFoundException('User không tồn tại');
+      throw new NotFoundException('Người dùng không tồn tại');
     }
 
-    // check password cũ
+    // Kiểm tra mật khẩu cũ trước khi cho đổi mật khẩu mới.
     const isMatch = await bcrypt.compare(dto.oldPassword, user.password);
 
     if (!isMatch) {
       throw new UnauthorizedException('Mật khẩu cũ không đúng');
     }
 
-    // check confirm
+    // Mật khẩu mới và xác nhận phải khớp nhau.
     if (dto.newPassword !== dto.confirmPassword) {
       throw new BadRequestException('Mật khẩu xác nhận không khớp');
     }
@@ -222,15 +288,15 @@ export class UsersService {
     });
 
     if (!user) {
-      throw new NotFoundException('User không tồn tại');
+      throw new NotFoundException('Người dùng không tồn tại');
     }
 
-    // convert birthday
+    // Chuyển birthday sang Date nếu người dùng có cập nhật.
     if (dto.birthday) {
       dto.birthday = new Date(dto.birthday);
     }
 
-    return this.prisma.users.update({
+    const updatedUser = await this.prisma.users.update({
       where: { id: userId },
       data: dto,
       select: {
@@ -242,7 +308,13 @@ export class UsersService {
         birthday: true,
         address: true,
         avatar: true,
+        currency_default: true,
       },
     });
+
+    return {
+      ...updatedUser,
+      wallet_count: await this.getWalletCount(userId),
+    };
   }
 }

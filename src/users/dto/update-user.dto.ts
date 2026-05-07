@@ -39,4 +39,8 @@ export class UpdateUserDto {
     message: 'Avatar phải là link ảnh',
   })
   avatar?: string;
+
+  @IsOptional()
+  @IsString()
+  currency_default?: string;
 }
