@@ -20,6 +20,12 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { LoginDto } from './dto/login.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { AdminCreateUserDto } from './dto/admin-create-user.dto';
+import {
+  CompletePasswordSetupDto,
+  ForgotPasswordDto,
+  ResetPasswordDto,
+} from './dto/forgot-password.dto';
 
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -86,6 +92,16 @@ export class UsersController {
   @Post('refresh')
   refresh(@Body() body: { refreshToken?: string }) {
     return this.usersService.refresh(body.refreshToken ?? '');
+  }
+
+  @Post('forgot-password')
+  forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.usersService.forgotPassword(dto.email);
+  }
+
+  @Post('reset-password')
+  resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.usersService.resetPassword(dto);
   }
 
   @UseGuards(JwtGuard)
@@ -255,6 +271,27 @@ export class UsersController {
     return result;
   }
 
+  @UseGuards(JwtGuard)
+  @Put('complete-password-setup')
+  async completePasswordSetup(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: CompletePasswordSetupDto,
+  ) {
+    const result = await this.usersService.completePasswordSetup(
+      req.user.userId,
+      dto,
+    );
+
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: req.user.userId,
+        action: `Người dùng tạo mật khẩu mới lần đầu (id: ${req.user.userId})`,
+      },
+    });
+
+    return result;
+  }
+
   @UseGuards(JwtGuard, AdminGuard)
   @Get()
   getAll() {
@@ -271,6 +308,22 @@ export class UsersController {
         action: `Tạo người dùng (${this.getUserLogLabel(user)})`,
       },
     });
+
+    return user;
+  }
+
+  @UseGuards(JwtGuard, AdminGuard)
+  @Post('admin')
+  async createByAdmin(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: AdminCreateUserDto,
+  ) {
+    const user = await this.usersService.createByAdmin(dto, req.user);
+
+    await this.logAdminAction(
+      req,
+      `Admin tạo người dùng (${this.getUserLogLabel(user)})`,
+    );
 
     return user;
   }

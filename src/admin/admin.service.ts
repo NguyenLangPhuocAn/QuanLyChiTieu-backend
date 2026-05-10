@@ -573,6 +573,7 @@ export class AdminService {
       yearTransactions,
       recentLogs,
       categories,
+      usersWithWalletCounts,
     ] = await Promise.all([
       this.prisma.users.count(),
       this.prisma.users.count({ where: { role: 'PREMIUM' } }),
@@ -625,6 +626,15 @@ export class AdminService {
           type: true,
         },
       }),
+      this.prisma.$queryRaw<
+        Array<{ id: number; role: string | null; wallet_count: bigint | number }>
+      >`
+        SELECT u.id, u.role, COUNT(w.id) AS wallet_count
+        FROM users u
+        LEFT JOIN wallets w ON w.user_id = u.id
+        WHERE COALESCE(u.is_active, 1) = 1
+        GROUP BY u.id, u.role
+      `,
     ]);
 
     const providerMeta = this.currencyService.getProviderMeta();
@@ -772,6 +782,31 @@ export class AdminService {
       { name: 'Premium', value: premiumUsers },
       { name: 'Admin', value: adminUsers },
     ];
+    const basicWalletCounts = usersWithWalletCounts
+      .filter((user) => user.role === 'BASIC')
+      .map((user) => Number(user.wallet_count));
+    const premiumWalletCounts = usersWithWalletCounts
+      .filter((user) => user.role === 'PREMIUM')
+      .map((user) => Number(user.wallet_count));
+    const basicAtWalletLimit = basicWalletCounts.filter((count) => count >= 2).length;
+    const basicNoWallet = basicWalletCounts.filter((count) => count === 0).length;
+    const premiumAverageWallets =
+      premiumWalletCounts.length > 0
+        ? premiumWalletCounts.reduce((sum, count) => sum + count, 0) /
+          premiumWalletCounts.length
+        : 0;
+    const subscriptionStats = {
+      basicUsers,
+      premiumUsers,
+      adminUsers,
+      premiumRate,
+      basicAtWalletLimit,
+      basicNoWallet,
+      basicLimitRate:
+        basicUsers > 0 ? Math.round((basicAtWalletLimit / basicUsers) * 100) : 0,
+      premiumAverageWallets,
+      upgradeOpportunityUsers: basicAtWalletLimit,
+    };
     const insightSeverity = (
       kind: 'premium' | 'cashflow' | 'alert',
     ): InsightSeverity => {
@@ -916,6 +951,7 @@ export class AdminService {
           { name: 'Ví âm', value: negativeWallets },
           { name: 'Vượt hạn mức', value: overBudgetWallets },
         ],
+        subscriptionStats,
       },
     };
   }

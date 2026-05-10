@@ -31,7 +31,9 @@ model password_resets {
   id         Int       @id @default(autoincrement())
   email      String?   @db.VarChar(255)
   token      String?   @db.VarChar(255)
+  token_hash String?   @db.VarChar(255)
   expired_at DateTime? @db.DateTime(0)
+  used_at    DateTime? @db.DateTime(0)
 }
 
 model tags {
@@ -79,6 +81,7 @@ model users {
   provider         String?     @default("local") @db.VarChar(50)
   provider_id      String?     @db.VarChar(255)
   is_active        Boolean?    @default(true)
+  must_change_password Boolean? @default(false)
   created_at       DateTime?   @default(now()) @db.Timestamp(0)
 }
 

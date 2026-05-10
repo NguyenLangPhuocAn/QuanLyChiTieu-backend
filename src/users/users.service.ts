@@ -9,9 +9,15 @@ import { PrismaService } from '../prisma/prisma.service';
 import * as bcrypt from 'bcrypt';
 import * as jwt from 'jsonwebtoken';
 import { randomBytes, randomUUID } from 'crypto';
+import * as nodemailer from 'nodemailer';
 import { CreateUserDto } from './dto/create-user.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { CurrencyService } from '../currency/currency.service';
+import { AdminCreateUserDto } from './dto/admin-create-user.dto';
+import {
+  CompletePasswordSetupDto,
+  ResetPasswordDto,
+} from './dto/forgot-password.dto';
 
 type UserBase = {
   id: number;
@@ -23,6 +29,7 @@ type UserBase = {
   address?: string | null;
   avatar?: string | null;
   currency_default?: string | null;
+  must_change_password?: boolean | number | null;
 };
 
 type AdminActor = {
@@ -35,6 +42,7 @@ const SUPER_ADMIN_EMAIL = 'admin@gmail.com';
 const ACCESS_TOKEN_EXPIRES_IN = '10m';
 const ACCESS_TOKEN_TTL_SECONDS = 10 * 60;
 const REFRESH_TOKEN_TTL_DAYS = 30;
+const RESET_TOKEN_TTL_MINUTES = 30;
 
 type UserWithWalletCount = UserBase & {
   wallet_count: number;
@@ -104,8 +112,8 @@ export class UsersService {
       throw new ForbiddenException('Admin thường không được xóa người dùng');
     }
 
-    if (!actorIsSuperAdmin && !isSelf) {
-      throw new ForbiddenException('Admin thường không được sửa người dùng khác');
+    if (!actorIsSuperAdmin && !isSelf && target.role === 'ADMIN') {
+      throw new ForbiddenException('Admin thường không được sửa admin khác');
     }
 
     if (targetIsSuperAdmin && !actorIsSuperAdmin) {
@@ -215,6 +223,54 @@ export class UsersService {
     `;
   }
 
+  private generateTemporaryPassword() {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+    const special = '@$!%*?&';
+    const pick = (source: string) =>
+      source[randomBytes(1)[0] % source.length];
+    const chars = [
+      pick('ABCDEFGHJKLMNPQRSTUVWXYZ'),
+      pick('abcdefghijkmnopqrstuvwxyz'),
+      pick('23456789'),
+      pick(special),
+      ...Array.from({ length: 8 }, () => pick(alphabet + special)),
+    ];
+
+    return chars.sort(() => randomBytes(1)[0] - 128).join('');
+  }
+
+  private async sendMail(to: string, subject: string, text: string) {
+    const host = process.env.SMTP_HOST;
+    const user = process.env.SMTP_USER;
+    const pass = process.env.SMTP_PASS;
+    const from = process.env.SMTP_FROM ?? user;
+
+    if (!host || !from) {
+      console.log(`[MAIL:DEV] To: ${to}\nSubject: ${subject}\n${text}`);
+      return { delivered: false, devOnly: true };
+    }
+
+    const transporter = nodemailer.createTransport({
+      host,
+      port: Number(process.env.SMTP_PORT ?? 587),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: user && pass ? { user, pass } : undefined,
+    });
+
+    await transporter.sendMail({ from, to, subject, text });
+    return { delivered: true, devOnly: false };
+  }
+
+  private buildResetLink(token: string) {
+    const baseUrl =
+      process.env.PASSWORD_RESET_URL ??
+      process.env.WEB_ADMIN_URL ??
+      'http://localhost:3001/reset-password';
+    const separator = baseUrl.includes('?') ? '&' : '?';
+
+    return `${baseUrl}${separator}token=${encodeURIComponent(token)}`;
+  }
+
   // ================= GET ALL =================
   async findAll() {
     const users = await this.prisma.$queryRaw<
@@ -246,6 +302,7 @@ export class UsersService {
         address: true,
         avatar: true,
         currency_default: true,
+        must_change_password: true,
       },
     });
 
@@ -288,6 +345,74 @@ export class UsersService {
     });
   }
 
+  async createByAdmin(dto: AdminCreateUserDto, actor?: AdminActor) {
+    if (!actor || actor.role !== 'ADMIN') {
+      throw new ForbiddenException('Không có quyền tạo người dùng');
+    }
+
+    const actorIsSuperAdmin = this.isSuperAdmin(actor);
+    const role = dto.role ?? 'BASIC';
+
+    if (role === 'ADMIN' && !actorIsSuperAdmin) {
+      throw new ForbiddenException('Chỉ admin tổng được tạo tài khoản admin');
+    }
+
+    const email = dto.email.trim().toLowerCase();
+    const existingUser = await this.prisma.users.findUnique({
+      where: { email },
+    });
+
+    if (existingUser) {
+      throw new BadRequestException('Email đã tồn tại');
+    }
+
+    const temporaryPassword = this.generateTemporaryPassword();
+    const hashedPassword = await bcrypt.hash(temporaryPassword, 10);
+    const createdUser = await this.prisma.users.create({
+      data: {
+        email,
+        password: hashedPassword,
+        role: role as 'BASIC' | 'PREMIUM' | 'ADMIN',
+        full_name: dto.full_name?.trim() || null,
+        phone: dto.phone?.trim() || null,
+        birthday: dto.birthday ? new Date(dto.birthday) : null,
+        address: dto.address?.trim() || null,
+        currency_default: this.currencyService.normalizeCurrency(
+          dto.currency_default,
+        ),
+        must_change_password: true,
+      },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        full_name: true,
+        phone: true,
+        birthday: true,
+        address: true,
+        avatar: true,
+        currency_default: true,
+        must_change_password: true,
+      },
+    });
+
+    const mailResult = await this.sendMail(
+      email,
+      'Tài khoản Quản lý chi tiêu của bạn',
+      [
+        'Tài khoản của bạn đã được tạo.',
+        `Email: ${email}`,
+        `Mật khẩu tạm: ${temporaryPassword}`,
+        'Vui lòng đăng nhập và đổi mật khẩu ở lần sử dụng đầu tiên.',
+      ].join('\n'),
+    );
+
+    return {
+      ...(await this.attachWalletCount(createdUser)),
+      mail: mailResult,
+    };
+  }
+
   // ================= UPDATE (ADMIN) =================
   async update(id: number, dto: any, actor?: AdminActor) {
     const user = await this.prisma.users.findUnique({
@@ -305,6 +430,7 @@ export class UsersService {
 
     if (dto.password) {
       dto.password = await bcrypt.hash(dto.password, 10);
+      dto.must_change_password = true;
     }
 
     // Chuyển ngày sinh từ chuỗi sang Date nếu có gửi lên.
@@ -326,6 +452,12 @@ export class UsersService {
         email: true,
         role: true,
         full_name: true,
+        phone: true,
+        birthday: true,
+        address: true,
+        avatar: true,
+        currency_default: true,
+        must_change_password: true,
       },
     });
 
@@ -364,6 +496,7 @@ export class UsersService {
         address: true,
         avatar: true,
         currency_default: true,
+        must_change_password: true,
       },
     });
 
@@ -484,6 +617,7 @@ export class UsersService {
 
     return {
       message: 'Đăng nhập thành công',
+      mustChangePassword: Boolean(user.must_change_password),
       ...tokens,
     };
   }
@@ -526,9 +660,14 @@ export class UsersService {
       }
 
       const users = await tx.$queryRaw<
-        Array<{ id: number; role: string | null; is_active: boolean | number | null }>
+        Array<{
+          id: number;
+          role: string | null;
+          is_active: boolean | number | null;
+          must_change_password: boolean | number | null;
+        }>
       >`
-        SELECT id, role, is_active
+        SELECT id, role, is_active, must_change_password
         FROM users
         WHERE id = ${stored.user_id}
         LIMIT 1
@@ -564,6 +703,7 @@ export class UsersService {
         expiresIn: ACCESS_TOKEN_TTL_SECONDS,
         refreshToken: nextRefreshToken,
         refreshTokenExpiresAt: expiresAt,
+        mustChangePassword: Boolean(user.must_change_password),
       };
     });
   }
@@ -584,6 +724,169 @@ export class UsersService {
     `;
 
     return { message: 'Logout' };
+  }
+
+  async forgotPassword(email: string) {
+    const normalizedEmail = email.trim().toLowerCase();
+    const user = await this.prisma.users.findUnique({
+      where: { email: normalizedEmail },
+      select: { id: true, email: true, is_active: true },
+    });
+
+    const genericMessage =
+      'Nếu email tồn tại, hệ thống đã gửi hướng dẫn đặt lại mật khẩu.';
+
+    if (!user || user.is_active === false) {
+      return { message: genericMessage };
+    }
+
+    const token = randomBytes(32).toString('base64url');
+    const tokenHash = await bcrypt.hash(token, 12);
+    const expiredAt = new Date();
+    expiredAt.setMinutes(expiredAt.getMinutes() + RESET_TOKEN_TTL_MINUTES);
+
+    await this.prisma.$executeRaw`
+      INSERT INTO password_resets (email, token, token_hash, expired_at)
+      VALUES (${normalizedEmail}, ${token}, ${tokenHash}, ${expiredAt})
+    `;
+
+    const resetLink = this.buildResetLink(token);
+    const mail = await this.sendMail(
+      normalizedEmail,
+      'Đặt lại mật khẩu Quản lý chi tiêu',
+      [
+        'Bạn vừa yêu cầu đặt lại mật khẩu.',
+        `Mã đặt lại mật khẩu: ${token}`,
+        `Liên kết: ${resetLink}`,
+        `Mã có hiệu lực trong ${RESET_TOKEN_TTL_MINUTES} phút.`,
+      ].join('\n'),
+    );
+
+    return {
+      message: genericMessage,
+      mail,
+      resetToken: process.env.NODE_ENV === 'production' ? undefined : token,
+    };
+  }
+
+  async resetPassword(dto: ResetPasswordDto) {
+    if (dto.newPassword !== dto.confirmPassword) {
+      throw new BadRequestException('Mật khẩu xác nhận không khớp');
+    }
+
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        id: number;
+        email: string | null;
+        token: string | null;
+        token_hash: string | null;
+        expired_at: Date | null;
+        used_at: Date | null;
+      }>
+    >`
+      SELECT id, email, token, token_hash, expired_at, used_at
+      FROM password_resets
+      WHERE used_at IS NULL
+        AND expired_at > NOW()
+      ORDER BY id DESC
+      LIMIT 20
+    `;
+    let matched:
+      | {
+          id: number;
+          email: string | null;
+          token: string | null;
+          token_hash: string | null;
+        }
+      | undefined;
+
+    for (const row of rows) {
+      const isMatch = row.token_hash
+        ? await bcrypt.compare(dto.token, row.token_hash)
+        : row.token === dto.token;
+
+      if (isMatch) {
+        matched = row;
+        break;
+      }
+    }
+
+    if (!matched?.email) {
+      throw new BadRequestException('Mã đặt lại mật khẩu không hợp lệ hoặc đã hết hạn');
+    }
+
+    const user = await this.prisma.users.findUnique({
+      where: { email: matched.email },
+      select: { id: true },
+    });
+
+    if (!user) {
+      throw new NotFoundException('Người dùng không tồn tại');
+    }
+
+    const hashedPassword = await bcrypt.hash(dto.newPassword, 10);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`
+        UPDATE users
+        SET password = ${hashedPassword},
+            must_change_password = 0
+        WHERE id = ${user.id}
+      `;
+      await tx.$executeRaw`
+        UPDATE password_resets
+        SET used_at = NOW()
+        WHERE id = ${matched.id}
+      `;
+      await tx.$executeRaw`
+        UPDATE refresh_tokens
+        SET revoked_at = NOW()
+        WHERE user_id = ${user.id}
+          AND revoked_at IS NULL
+      `;
+    });
+
+    return { message: 'Đặt lại mật khẩu thành công' };
+  }
+
+  async completePasswordSetup(userId: number, dto: CompletePasswordSetupDto) {
+    if (dto.newPassword !== dto.confirmPassword) {
+      throw new BadRequestException('Mật khẩu xác nhận không khớp');
+    }
+
+    const user = await this.prisma.users.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      throw new NotFoundException('Người dùng không tồn tại');
+    }
+
+    if (!user.must_change_password) {
+      throw new BadRequestException('Tài khoản này không cần tạo mật khẩu mới');
+    }
+
+    const hashedPassword = await bcrypt.hash(dto.newPassword, 10);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`
+        UPDATE users
+        SET password = ${hashedPassword},
+            must_change_password = 0
+        WHERE id = ${userId}
+      `;
+      await tx.$executeRaw`
+        UPDATE refresh_tokens
+        SET revoked_at = NOW()
+        WHERE user_id = ${userId}
+          AND revoked_at IS NULL
+      `;
+    });
+
+    return {
+      message: 'Tạo mật khẩu mới thành công, vui lòng đăng nhập lại',
+      forceLogout: true,
+    };
   }
 
   // ================= CHANGE PASSWORD =================
@@ -613,7 +916,8 @@ export class UsersService {
     await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`
         UPDATE users
-        SET password = ${hashedPassword}
+        SET password = ${hashedPassword},
+            must_change_password = 0
         WHERE id = ${userId}
       `;
       await tx.$executeRaw`
