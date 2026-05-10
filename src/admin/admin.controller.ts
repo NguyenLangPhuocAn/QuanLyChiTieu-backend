@@ -18,8 +18,12 @@ export class AdminController {
   constructor(private adminService: AdminService) {}
 
   @Get('dashboard')
-  getDashboard(@Query('date') date?: string) {
-    return this.adminService.getDashboard(date);
+  getDashboard(
+    @Req() req: AuthenticatedRequest,
+    @Query('date') date?: string,
+    @Query('period') period?: string,
+  ) {
+    return this.adminService.getDashboard(req.user.userId, date, period);
   }
 
   @Get('logs')

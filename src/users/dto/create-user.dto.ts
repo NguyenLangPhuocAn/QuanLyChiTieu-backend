@@ -1,4 +1,5 @@
-import { IsEmail, IsString, MinLength, Matches } from 'class-validator';
+import { IsEmail, IsIn, IsOptional, IsString, MinLength, Matches } from 'class-validator';
+import { SUPPORTED_CURRENCIES } from '../../currency/currency.constants';
 
 export class CreateUserDto {
   // ================= EMAIL =================
@@ -17,4 +18,11 @@ export class CreateUserDto {
   // chỉ dùng để check, KHÔNG lưu DB
   @IsString()
   confirmPassword!: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn([...SUPPORTED_CURRENCIES], {
+    message: `Tiền tệ mặc định chỉ hỗ trợ: ${SUPPORTED_CURRENCIES.join(', ')}`,
+  })
+  currency_default?: string;
 }

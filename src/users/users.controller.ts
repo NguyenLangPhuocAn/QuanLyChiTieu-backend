@@ -31,6 +31,7 @@ type AuthenticatedRequest = Request & {
   // Sau khi qua JwtGuard, thông tin user đã giải mã sẽ được gắn vào req.user.
   user: {
     userId: number;
+    email?: string;
     role?: string;
   };
 };
@@ -82,9 +83,22 @@ export class UsersController {
     return this.usersService.login(dto.email, dto.password);
   }
 
+  @Post('refresh')
+  refresh(@Body() body: { refreshToken?: string }) {
+    return this.usersService.refresh(body.refreshToken ?? '');
+  }
+
   @UseGuards(JwtGuard)
   @Post('logout')
-  async logout(@Req() req: AuthenticatedRequest) {
+  async logout(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: { refreshToken?: string },
+  ) {
+    const result = await this.usersService.logout(
+      req.user.userId,
+      body.refreshToken,
+    );
+
     await this.prisma.admin_logs.create({
       data: {
         admin_id: req.user.userId,
@@ -92,9 +106,7 @@ export class UsersController {
       },
     });
 
-    return {
-      message: 'Logout',
-    };
+    return result;
   }
 
   @UseGuards(JwtGuard)
@@ -165,6 +177,25 @@ export class UsersController {
     return user;
   }
 
+  @UseGuards(JwtGuard)
+  @Delete('me')
+  async deactivateMe(@Req() req: AuthenticatedRequest) {
+    const user = await this.usersService.deactivateSelf(req.user.userId);
+
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: req.user.userId,
+        action: `Người dùng tự vô hiệu hóa tài khoản (${this.getUserLogLabel(user)})`,
+      },
+    });
+
+    return {
+      message: 'Tài khoản đã được vô hiệu hóa',
+      user,
+      forceLogout: true,
+    };
+  }
+
   @UseGuards(JwtGuard, AdminGuard)
   @Put('detail/:id/avatar')
   @UseInterceptors(
@@ -196,7 +227,7 @@ export class UsersController {
     @UploadedFile() file: Express.Multer.File,
   ) {
     // Admin chỉ định user theo param id và cập nhật trường avatar bằng tên file mới.
-    const user = await this.usersService.updateAvatar(id, file.filename);
+    const user = await this.usersService.updateAvatar(id, file.filename, req.user);
 
     await this.logAdminAction(
       req,
@@ -257,7 +288,7 @@ export class UsersController {
     @Param('id', ParseIntPipe) id: number,
     @Body() body: any,
   ) {
-    const user = await this.usersService.update(id, body);
+    const user = await this.usersService.update(id, body, req.user);
 
     await this.logAdminAction(
       req,
@@ -273,11 +304,11 @@ export class UsersController {
     @Req() req: AuthenticatedRequest,
     @Param('id', ParseIntPipe) id: number,
   ) {
-    const user = await this.usersService.remove(id);
+    const user = await this.usersService.remove(id, req.user);
 
     await this.logAdminAction(
       req,
-      `Admin xóa người dùng (${this.getUserLogLabel(user)})`,
+      `Admin vô hiệu hóa người dùng (${this.getUserLogLabel(user)})`,
     );
 
     return user;

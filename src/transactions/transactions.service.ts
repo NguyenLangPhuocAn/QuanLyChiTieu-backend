@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, categories, transactions } from '@prisma/client';
+import { CurrencyService } from '../currency/currency.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CreateTransactionDto,
@@ -15,9 +16,18 @@ type TransactionWithCategory = transactions & {
   category?: categories | null;
 };
 
+type OwnedWallet = {
+  id: number;
+  user_id: number | null;
+  currency: string;
+};
+
 @Injectable()
 export class TransactionsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private currencyService: CurrencyService,
+  ) {}
 
   private readonly transactionSelect = {
     id: true,
@@ -42,18 +52,39 @@ export class TransactionsService {
 
   private toSignedAmount(amount: string, type: TransactionType) {
     const decimal = this.toDecimal(amount);
-
     return type === TransactionType.EXPENSE ? decimal.negated() : decimal;
   }
 
-  private normalizeTransaction(transaction: TransactionWithCategory) {
+  private async getActorCurrency(userId: number) {
+    const user = await this.prisma.users.findUnique({
+      where: { id: userId },
+      select: { currency_default: true },
+    });
+
+    return this.currencyService.normalizeCurrency(user?.currency_default);
+  }
+
+  private async normalizeTransaction(
+    transaction: TransactionWithCategory,
+    walletCurrency: string,
+    targetCurrency: string,
+  ) {
     const signedAmount = new Prisma.Decimal(transaction.amount);
     const type = this.getTypeFromSignedAmount(signedAmount);
+    const absoluteAmount = signedAmount.abs();
+    const converted = await this.currencyService.convertAmount(
+      absoluteAmount,
+      walletCurrency,
+      targetCurrency,
+    );
 
     return {
       ...transaction,
-      amount: signedAmount.abs(),
+      amount: absoluteAmount,
       type,
+      currency: this.currencyService.normalizeCurrency(walletCurrency),
+      display_amount: converted.amount,
+      display_currency: converted.toCurrency,
       category: transaction.category
         ? {
             id: transaction.category.id,
@@ -66,18 +97,19 @@ export class TransactionsService {
   }
 
   private async getOwnedWallet(userId: number, walletId: number) {
-    const wallet = await this.prisma.wallets.findFirst({
-      where: {
-        id: walletId,
-        user_id: userId,
-      },
-    });
+    const wallets = await this.prisma.$queryRaw<OwnedWallet[]>`
+      SELECT id, user_id, currency
+      FROM wallets
+      WHERE id = ${walletId} AND user_id = ${userId}
+      LIMIT 1
+    `;
+    const wallet = wallets[0];
 
     if (!wallet) {
       throw new NotFoundException('Không tìm thấy ví');
     }
 
-    return wallet;
+    return wallet satisfies OwnedWallet;
   }
 
   private async getAccessibleCategory(userId: number, categoryId: number) {
@@ -103,32 +135,40 @@ export class TransactionsService {
     return category;
   }
 
-  private async attachCategories(transactions: transactions[]) {
-    const categoryIds = transactions
+  private async attachCategories(
+    userId: number,
+    transactionsList: transactions[],
+    walletCurrencyMap: Map<number, string>,
+  ) {
+    const actorCurrency = await this.getActorCurrency(userId);
+    const categoryIds = transactionsList
       .map((transaction) => transaction.category_id)
       .filter((id): id is number => id !== null);
 
-    if (categoryIds.length === 0) {
-      return transactions.map((transaction) =>
-        this.normalizeTransaction(transaction),
-      );
-    }
-
-    const categories = await this.prisma.categories.findMany({
-      where: { id: { in: categoryIds } },
-    });
+    const categoriesList =
+      categoryIds.length > 0
+        ? await this.prisma.categories.findMany({
+            where: { id: { in: categoryIds } },
+          })
+        : [];
 
     const categoryMap = new Map(
-      categories.map((category) => [category.id, category]),
+      categoriesList.map((category) => [category.id, category]),
     );
 
-    return transactions.map((transaction) =>
-      this.normalizeTransaction({
-        ...transaction,
-        category: transaction.category_id
-          ? (categoryMap.get(transaction.category_id) ?? null)
-          : null,
-      }),
+    return Promise.all(
+      transactionsList.map((transaction) =>
+        this.normalizeTransaction(
+          {
+            ...transaction,
+            category: transaction.category_id
+              ? (categoryMap.get(transaction.category_id) ?? null)
+              : null,
+          },
+          walletCurrencyMap.get(transaction.wallet_id ?? 0) ?? 'VND',
+          actorCurrency,
+        ),
+      ),
     );
   }
 
@@ -139,30 +179,33 @@ export class TransactionsService {
   ) {
     if (categoryId) {
       const category = await this.getAccessibleCategory(userId, categoryId);
-
       return category.type as TransactionType;
     }
 
     if (!fallbackType) {
-      throw new BadRequestException('Cần loại giao dịch khi thiếu danh mục');
+      throw new BadRequestException('Can loai giao dich khi thieu danh muc');
     }
 
     return fallbackType;
   }
 
   async findAll(userId: number, walletId?: number) {
-    const wallets = await this.prisma.wallets.findMany({
-      where: { user_id: userId },
-      select: { id: true },
-    });
+    const wallets = await this.prisma.$queryRaw<Array<{ id: number; currency: string }>>`
+      SELECT id, currency
+      FROM wallets
+      WHERE user_id = ${userId}
+    `;
 
     const walletIds = wallets.map((wallet) => wallet.id);
+    const walletCurrencyMap = new Map(
+      wallets.map((wallet) => [wallet.id, wallet.currency]),
+    );
 
     if (walletId !== undefined) {
       await this.getOwnedWallet(userId, walletId);
     }
 
-    const transactions = await this.prisma.transactions.findMany({
+    const transactionsList = await this.prisma.transactions.findMany({
       where: {
         wallet_id: walletId ?? { in: walletIds },
       },
@@ -170,12 +213,11 @@ export class TransactionsService {
       select: this.transactionSelect,
     });
 
-    return this.attachCategories(transactions);
+    return this.attachCategories(userId, transactionsList, walletCurrencyMap);
   }
 
   async create(userId: number, dto: CreateTransactionDto) {
-    await this.getOwnedWallet(userId, dto.wallet_id);
-
+    const wallet = await this.getOwnedWallet(userId, dto.wallet_id);
     const type = await this.resolveType(userId, dto.category_id, dto.type);
     const signedAmount = this.toSignedAmount(dto.amount, type);
 
@@ -194,7 +236,6 @@ export class TransactionsService {
         select: this.transactionSelect,
       });
 
-      // Số tiền lưu trong database có dấu: khoản thu cộng vào ví, khoản chi trừ khỏi ví.
       await tx.wallets.update({
         where: { id: dto.wallet_id },
         data: {
@@ -207,7 +248,12 @@ export class TransactionsService {
       return transaction;
     });
 
-    const [normalized] = await this.attachCategories([created]);
+    const walletCurrencyMap = new Map([[wallet.id, wallet.currency]]);
+    const [normalized] = await this.attachCategories(
+      userId,
+      [created],
+      walletCurrencyMap,
+    );
 
     return normalized;
   }
@@ -222,12 +268,18 @@ export class TransactionsService {
       throw new NotFoundException('Không tìm thấy giao dịch');
     }
 
-    const currentWalletId = current.wallet_id;
+    const currentWallet = await this.getOwnedWallet(userId, current.wallet_id);
+    const nextWalletId = dto.wallet_id ?? current.wallet_id;
+    const nextWallet = await this.getOwnedWallet(userId, nextWalletId);
 
-    await this.getOwnedWallet(userId, currentWalletId);
-
-    const nextWalletId = dto.wallet_id ?? currentWalletId;
-    await this.getOwnedWallet(userId, nextWalletId);
+    if (
+      current.wallet_id !== nextWalletId &&
+      currentWallet.currency !== nextWallet.currency
+    ) {
+      throw new BadRequestException(
+        'Không thể chuyển giao dịch sang ví có tiền tệ khác',
+      );
+    }
 
     const currentSignedAmount = new Prisma.Decimal(current.amount);
     const currentType = this.getTypeFromSignedAmount(currentSignedAmount);
@@ -242,9 +294,9 @@ export class TransactionsService {
         : this.toSignedAmount(currentSignedAmount.abs().toString(), nextType);
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      if (currentWalletId === nextWalletId) {
+      if (current.wallet_id === nextWalletId) {
         await tx.wallets.update({
-          where: { id: currentWalletId },
+          where: { id: current.wallet_id },
           data: {
             balance: {
               increment: nextSignedAmount.minus(currentSignedAmount),
@@ -253,7 +305,7 @@ export class TransactionsService {
         });
       } else {
         await tx.wallets.update({
-          where: { id: currentWalletId },
+          where: { id: current.wallet_id as number },
           data: {
             balance: {
               decrement: currentSignedAmount,
@@ -287,7 +339,12 @@ export class TransactionsService {
       });
     });
 
-    const [normalized] = await this.attachCategories([updated]);
+    const walletCurrencyMap = new Map([[nextWallet.id, nextWallet.currency]]);
+    const [normalized] = await this.attachCategories(
+      userId,
+      [updated],
+      walletCurrencyMap,
+    );
 
     return normalized;
   }
@@ -302,7 +359,7 @@ export class TransactionsService {
       throw new NotFoundException('Không tìm thấy giao dịch');
     }
 
-    await this.getOwnedWallet(userId, current.wallet_id);
+    const wallet = await this.getOwnedWallet(userId, current.wallet_id);
 
     const deleted = await this.prisma.$transaction(async (tx) => {
       await tx.wallets.update({
@@ -320,7 +377,12 @@ export class TransactionsService {
       });
     });
 
-    const [normalized] = await this.attachCategories([deleted]);
+    const walletCurrencyMap = new Map([[wallet.id, wallet.currency]]);
+    const [normalized] = await this.attachCategories(
+      userId,
+      [deleted],
+      walletCurrencyMap,
+    );
 
     return normalized;
   }
@@ -335,18 +397,22 @@ export class TransactionsService {
       throw new NotFoundException('Không tìm thấy giao dịch');
     }
 
-    await this.getOwnedWallet(userId, current.wallet_id);
+    const wallet = await this.getOwnedWallet(userId, current.wallet_id);
 
     const updated = await this.prisma.transactions.update({
       where: { id },
       data: {
-        // Chỉ lưu tên file để frontend có thể ghép với domain uploads khi cần hiển thị.
         receipt_image: filename,
       },
       select: this.transactionSelect,
     });
 
-    const [normalized] = await this.attachCategories([updated]);
+    const walletCurrencyMap = new Map([[wallet.id, wallet.currency]]);
+    const [normalized] = await this.attachCategories(
+      userId,
+      [updated],
+      walletCurrencyMap,
+    );
 
     return normalized;
   }

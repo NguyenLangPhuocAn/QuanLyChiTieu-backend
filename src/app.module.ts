@@ -9,6 +9,7 @@ import { CategoriesModule } from './categories/categories.module';
 import { WalletsModule } from './wallets/wallets.module';
 import { TransactionsModule } from './transactions/transactions.module';
 import { AdminModule } from './admin/admin.module';
+import { CurrencyModule } from './currency/currency.module';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { AdminModule } from './admin/admin.module';
       rootPath: join(__dirname, '..', 'public'),
       serveRoot: '/public',
     }),
+    CurrencyModule,
     CategoriesModule,
     WalletsModule,
     TransactionsModule,

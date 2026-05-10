@@ -1,10 +1,12 @@
 import {
+  IsIn,
   IsNotEmpty,
   IsOptional,
   IsString,
   MaxLength,
   Matches,
 } from 'class-validator';
+import { SUPPORTED_CURRENCIES } from '../../currency/currency.constants';
 
 export class CreateWalletDto {
   @IsString({ message: 'Tên ví phải là chuỗi ký tự' })
@@ -25,4 +27,11 @@ export class CreateWalletDto {
       'Hạn mức chi tiêu phải là số không âm và có tối đa 2 chữ số thập phân',
   })
   budget_limit?: string;
+
+  @IsOptional()
+  @IsString({ message: 'Tiền tệ phải là chuỗi ký tự' })
+  @IsIn([...SUPPORTED_CURRENCIES], {
+    message: `Tiền tệ chỉ hỗ trợ: ${SUPPORTED_CURRENCIES.join(', ')}`,
+  })
+  currency?: string;
 }

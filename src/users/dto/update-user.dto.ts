@@ -1,10 +1,12 @@
 import {
+  IsIn,
   IsString,
   IsOptional,
   Matches,
   IsDateString,
   IsUrl,
 } from 'class-validator';
+import { SUPPORTED_CURRENCIES } from '../../currency/currency.constants';
 
 export class UpdateUserDto {
   // ================= FULL NAME =================
@@ -42,5 +44,8 @@ export class UpdateUserDto {
 
   @IsOptional()
   @IsString()
+  @IsIn([...SUPPORTED_CURRENCIES], {
+    message: `Tiền tệ mặc định chỉ hỗ trợ: ${SUPPORTED_CURRENCIES.join(', ')}`,
+  })
   currency_default?: string;
 }
