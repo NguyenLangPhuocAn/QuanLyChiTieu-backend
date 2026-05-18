@@ -8,16 +8,25 @@ import { CurrencyService } from '../currency/currency.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateWalletDto } from './dto/create-wallet.dto';
 import { UpdateWalletDto } from './dto/update-wallet.dto';
+import { WALLET_TYPES, type WalletType } from './dto/create-wallet.dto';
 
 type WalletRow = {
   id: number;
   user_id: number | null;
   name: string;
+  wallet_type: WalletType;
   currency: string;
   balance: Prisma.Decimal | null;
   budget_limit: Prisma.Decimal | null;
   created_at: Date | null;
 };
+
+const BALANCE_ADJUSTMENT_NOTE = 'Điều chỉnh số dư';
+const BALANCE_ADJUSTMENT_CATEGORY_NAME = 'Khác';
+const BALANCE_ADJUSTMENT_CATEGORY_ICONS = {
+  INCOME: 'categories/icons/expense_other.png',
+  EXPENSE: 'categories/icons/expense_other.png',
+} as const;
 
 @Injectable()
 export class WalletsService {
@@ -33,7 +42,11 @@ export class WalletsService {
       return undefined;
     }
 
-    return new Prisma.Decimal(rawValue);
+    try {
+      return new Prisma.Decimal(rawValue);
+    } catch {
+      throw new BadRequestException('Số tiền không hợp lệ');
+    }
   }
 
   private async getActor(userId: number) {
@@ -57,15 +70,56 @@ export class WalletsService {
     return walletUserId === userId;
   }
 
+  private normalizeWalletType(type?: string | null): WalletType {
+    return WALLET_TYPES.includes(type as WalletType)
+      ? (type as WalletType)
+      : 'CASH';
+  }
+
   private async findWalletById(id: number) {
     const rows = await this.prisma.$queryRaw<WalletRow[]>`
-      SELECT id, user_id, name, currency, balance, budget_limit, created_at
+      SELECT id, user_id, name, wallet_type, currency, balance, budget_limit, created_at
       FROM wallets
       WHERE id = ${id}
       LIMIT 1
     `;
 
     return rows[0] ?? null;
+  }
+
+  private async getBalanceAdjustmentCategoryId(
+    tx: Prisma.TransactionClient,
+    type: 'INCOME' | 'EXPENSE',
+  ) {
+    const icon = BALANCE_ADJUSTMENT_CATEGORY_ICONS[type];
+    const existed = await tx.categories.findFirst({
+      where: {
+        type,
+        is_system: true,
+        OR: [
+          { name: BALANCE_ADJUSTMENT_CATEGORY_NAME },
+          { icon },
+        ],
+      },
+      select: { id: true },
+    });
+
+    if (existed) {
+      return existed.id;
+    }
+
+    const created = await tx.categories.create({
+      data: {
+        name: BALANCE_ADJUSTMENT_CATEGORY_NAME,
+        type,
+        is_system: true,
+        user_id: null,
+        icon,
+      },
+      select: { id: true },
+    });
+
+    return created.id;
   }
 
   private async decorateWallet(
@@ -99,7 +153,7 @@ export class WalletsService {
   async findAll(userId: number) {
     const actor = await this.getActor(userId);
     const wallets = await this.prisma.$queryRaw<WalletRow[]>`
-      SELECT id, user_id, name, currency, balance, budget_limit, created_at
+      SELECT id, user_id, name, wallet_type, currency, balance, budget_limit, created_at
       FROM wallets
       WHERE user_id = ${userId}
       ORDER BY id DESC
@@ -159,11 +213,12 @@ export class WalletsService {
     const currency = this.currencyService.normalizeCurrency(
       dto.currency ?? actor.currency_default,
     );
+    const walletType = this.normalizeWalletType(dto.wallet_type);
 
     const walletId = await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`
-        INSERT INTO wallets (user_id, name, currency, balance, budget_limit, created_at)
-        VALUES (${userId}, ${name}, ${currency}, ${balance}, ${budgetLimit}, NOW())
+        INSERT INTO wallets (user_id, name, wallet_type, currency, balance, budget_limit, created_at)
+        VALUES (${userId}, ${name}, ${walletType}, ${currency}, ${balance}, ${budgetLimit}, NOW())
       `;
 
       const rows = await tx.$queryRaw<Array<{ id: number }>>`
@@ -197,21 +252,22 @@ export class WalletsService {
       throw new BadRequestException('Bạn không có quyền sửa ví này');
     }
 
-    if (dto.balance !== undefined) {
-      throw new BadRequestException(
-        'Không thể sửa trực tiếp số dư ví. Hãy thêm giao dịch điều chỉnh.',
-      );
-    }
-
     const nextName = dto.name?.trim();
     const nextCurrency =
       dto.currency !== undefined
         ? this.currencyService.normalizeCurrency(dto.currency)
         : undefined;
+    const nextWalletType =
+      dto.wallet_type !== undefined
+        ? this.normalizeWalletType(dto.wallet_type)
+        : undefined;
+    const nextBalance = this.toDecimal(dto.balance);
     const hasUpdateData =
       nextName !== undefined ||
+      nextWalletType !== undefined ||
       dto.budget_limit !== undefined ||
-      nextCurrency !== undefined;
+      nextCurrency !== undefined ||
+      nextBalance !== undefined;
 
     if (!hasUpdateData) {
       throw new BadRequestException('Không có dữ liệu để cập nhật');
@@ -243,17 +299,49 @@ export class WalletsService {
       }
     }
 
-    await this.prisma.$executeRaw`
-      UPDATE wallets
-      SET
-        name = COALESCE(${nextName ?? null}, name),
-        currency = COALESCE(${nextCurrency ?? null}, currency),
-        budget_limit = CASE
-          WHEN ${dto.budget_limit !== undefined} THEN ${this.toDecimal(dto.budget_limit) ?? null}
-          ELSE budget_limit
-        END
-      WHERE id = ${id}
-    `;
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`
+        UPDATE wallets
+        SET
+          name = COALESCE(${nextName ?? null}, name),
+          wallet_type = COALESCE(${nextWalletType ?? null}, wallet_type),
+          currency = COALESCE(${nextCurrency ?? null}, currency),
+          budget_limit = CASE
+            WHEN ${dto.budget_limit !== undefined} THEN ${this.toDecimal(dto.budget_limit) ?? null}
+            ELSE budget_limit
+          END
+        WHERE id = ${id}
+      `;
+
+      if (nextBalance !== undefined) {
+        const currentBalance = new Prisma.Decimal(wallet.balance ?? 0);
+        const adjustmentAmount = nextBalance.minus(currentBalance);
+
+        if (!adjustmentAmount.isZero()) {
+          const type = adjustmentAmount.greaterThan(0) ? 'INCOME' : 'EXPENSE';
+          const categoryId = await this.getBalanceAdjustmentCategoryId(tx, type);
+
+          await tx.transactions.create({
+            data: {
+              wallet_id: id,
+              category_id: categoryId,
+              amount: adjustmentAmount,
+              note: BALANCE_ADJUSTMENT_NOTE,
+              transaction_date: new Date(),
+            },
+          });
+
+          await tx.wallets.update({
+            where: { id },
+            data: {
+              balance: {
+                increment: adjustmentAmount,
+              },
+            },
+          });
+        }
+      }
+    });
 
     const actor = await this.getActor(userId);
     const updated = await this.findWalletById(id);

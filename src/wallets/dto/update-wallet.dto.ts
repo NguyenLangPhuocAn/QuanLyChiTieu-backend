@@ -1,5 +1,6 @@
 import { IsIn, IsOptional, IsString, MaxLength, Matches } from 'class-validator';
 import { SUPPORTED_CURRENCIES } from '../../currency/currency.constants';
+import { WALLET_TYPES, type WalletType } from './create-wallet.dto';
 
 export class UpdateWalletDto {
   @IsOptional()
@@ -27,4 +28,11 @@ export class UpdateWalletDto {
     message: `Tiền tệ chỉ hỗ trợ: ${SUPPORTED_CURRENCIES.join(', ')}`,
   })
   currency?: string;
+
+  @IsOptional()
+  @IsString({ message: 'Loại ví phải là chuỗi ký tự' })
+  @IsIn([...WALLET_TYPES], {
+    message: `Loại ví chỉ hỗ trợ: ${WALLET_TYPES.join(', ')}`,
+  })
+  wallet_type?: WalletType;
 }

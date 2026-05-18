@@ -4,6 +4,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, categories, transactions } from '@prisma/client';
+import { existsSync } from 'fs';
+import { unlink } from 'fs/promises';
+import { join, normalize } from 'path';
 import { CurrencyService } from '../currency/currency.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -14,6 +17,7 @@ import { UpdateTransactionDto } from './dto/update-transaction.dto';
 
 type TransactionWithCategory = transactions & {
   category?: categories | null;
+  tags?: string[];
 };
 
 type OwnedWallet = {
@@ -22,8 +26,23 @@ type OwnedWallet = {
   currency: string;
 };
 
+type TransactionQuery = {
+  walletId?: number;
+  categoryId?: number;
+  type?: TransactionType;
+  tag?: string;
+  q?: string;
+  note?: string;
+  from?: string;
+  to?: string;
+  page?: number;
+  limit?: number;
+};
+
 @Injectable()
 export class TransactionsService {
+  private readonly receiptUploadDir = normalize(join(process.cwd(), 'uploads', 'receipts'));
+
   constructor(
     private prisma: PrismaService,
     private currencyService: CurrencyService,
@@ -44,6 +63,45 @@ export class TransactionsService {
     return new Prisma.Decimal(value);
   }
 
+  private toPositiveDecimal(value: string) {
+    const decimal = this.toDecimal(value);
+
+    if (decimal.lessThanOrEqualTo(0)) {
+      throw new BadRequestException('Số tiền giao dịch phải lớn hơn 0');
+    }
+
+    return decimal;
+  }
+
+  private parseDateFilter(value: string, endOfDay = false) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+
+    if (!match) {
+      throw new BadRequestException('Ngày lọc giao dịch không hợp lệ');
+    }
+
+    const date = new Date(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3]),
+      endOfDay ? 23 : 0,
+      endOfDay ? 59 : 0,
+      endOfDay ? 59 : 0,
+      endOfDay ? 999 : 0,
+    );
+
+    if (
+      Number.isNaN(date.getTime()) ||
+      date.getFullYear() !== Number(match[1]) ||
+      date.getMonth() !== Number(match[2]) - 1 ||
+      date.getDate() !== Number(match[3])
+    ) {
+      throw new BadRequestException('Ngày lọc giao dịch không hợp lệ');
+    }
+
+    return date;
+  }
+
   private getTypeFromSignedAmount(amount: Prisma.Decimal) {
     return amount.greaterThanOrEqualTo(0)
       ? TransactionType.INCOME
@@ -51,8 +109,85 @@ export class TransactionsService {
   }
 
   private toSignedAmount(amount: string, type: TransactionType) {
-    const decimal = this.toDecimal(amount);
+    const decimal = this.toPositiveDecimal(amount);
     return type === TransactionType.EXPENSE ? decimal.negated() : decimal;
+  }
+
+  private normalizeTags(tags?: string[]) {
+    if (!tags) {
+      return [];
+    }
+
+    return [
+      ...new Set(
+        tags
+          .map((tag) => tag.trim().replace(/^#+/, '').toLowerCase())
+          .filter((tag) => tag.length > 0)
+          .map((tag) => tag.slice(0, 50)),
+      ),
+    ].slice(0, 8);
+  }
+
+  private async deleteReceiptFile(filename?: string | null) {
+    if (!filename || filename.includes('/') || filename.includes('\\')) {
+      return;
+    }
+
+    const targetPath = normalize(join(this.receiptUploadDir, filename));
+
+    if (!targetPath.startsWith(this.receiptUploadDir) || !existsSync(targetPath)) {
+      return;
+    }
+
+    try {
+      await unlink(targetPath);
+    } catch {
+      // The database state is the source of truth; a missing/locked file should not fail the transaction flow.
+    }
+  }
+
+  private async syncTags(
+    tx: Prisma.TransactionClient,
+    userId: number,
+    transactionId: number,
+    tags?: string[],
+  ) {
+    if (tags === undefined) {
+      return;
+    }
+
+    const normalizedTags = this.normalizeTags(tags);
+
+    await tx.transaction_tags.deleteMany({
+      where: { transaction_id: transactionId },
+    });
+
+    if (normalizedTags.length === 0) {
+      return;
+    }
+
+    for (const tagName of normalizedTags) {
+      const tag =
+        (await tx.tags.findFirst({
+          where: {
+            name: tagName,
+            user_id: userId,
+          },
+        })) ??
+        (await tx.tags.create({
+          data: {
+            name: tagName,
+            user_id: userId,
+          },
+        }));
+
+      await tx.transaction_tags.create({
+        data: {
+          transaction_id: transactionId,
+          tag_id: tag.id,
+        },
+      });
+    }
   }
 
   private async getActorCurrency(userId: number) {
@@ -93,6 +228,7 @@ export class TransactionsService {
             icon: transaction.category.icon,
           }
         : null,
+      tags: transaction.tags ?? [],
     };
   }
 
@@ -155,6 +291,30 @@ export class TransactionsService {
     const categoryMap = new Map(
       categoriesList.map((category) => [category.id, category]),
     );
+    const transactionIds = transactionsList.map((transaction) => transaction.id);
+    const tagRows =
+      transactionIds.length > 0
+        ? await this.prisma.$queryRaw<
+            Array<{
+              transaction_id: number;
+              name: string;
+            }>
+          >`
+            SELECT tt.transaction_id, t.name
+            FROM transaction_tags tt
+            INNER JOIN tags t ON t.id = tt.tag_id
+            WHERE tt.transaction_id IN (${Prisma.join(transactionIds)})
+            ORDER BY t.name ASC
+          `
+        : [];
+    const tagMap = new Map<number, string[]>();
+
+    tagRows.forEach((row) => {
+      tagMap.set(row.transaction_id, [
+        ...(tagMap.get(row.transaction_id) ?? []),
+        row.name,
+      ]);
+    });
 
     return Promise.all(
       transactionsList.map((transaction) =>
@@ -164,6 +324,7 @@ export class TransactionsService {
             category: transaction.category_id
               ? (categoryMap.get(transaction.category_id) ?? null)
               : null,
+            tags: tagMap.get(transaction.id) ?? [],
           },
           walletCurrencyMap.get(transaction.wallet_id ?? 0) ?? 'VND',
           actorCurrency,
@@ -189,7 +350,7 @@ export class TransactionsService {
     return fallbackType;
   }
 
-  async findAll(userId: number, walletId?: number) {
+  async findAll(userId: number, query: TransactionQuery = {}) {
     const wallets = await this.prisma.$queryRaw<Array<{ id: number; currency: string }>>`
       SELECT id, currency
       FROM wallets
@@ -201,19 +362,110 @@ export class TransactionsService {
       wallets.map((wallet) => [wallet.id, wallet.currency]),
     );
 
-    if (walletId !== undefined) {
-      await this.getOwnedWallet(userId, walletId);
+    if (query.walletId !== undefined) {
+      await this.getOwnedWallet(userId, query.walletId);
     }
 
+    const where: Prisma.transactionsWhereInput = {
+      wallet_id: query.walletId ?? { in: walletIds },
+    };
+
+    if (query.categoryId !== undefined) {
+      where.category_id = query.categoryId;
+    }
+
+    if (query.type === TransactionType.INCOME) {
+      where.amount = { gte: 0 };
+    }
+
+    if (query.type === TransactionType.EXPENSE) {
+      where.amount = { lt: 0 };
+    }
+
+    if (query.from || query.to) {
+      where.transaction_date = {
+        ...(query.from ? { gte: this.parseDateFilter(query.from) } : {}),
+        ...(query.to ? { lte: this.parseDateFilter(query.to, true) } : {}),
+      };
+    }
+
+    const noteKeyword = (query.note ?? query.q)?.trim();
+
+    if (noteKeyword) {
+      where.note = { contains: noteKeyword };
+    }
+
+    if (query.tag?.trim()) {
+      const normalizedTag = query.tag.trim().replace(/^#+/, '').toLowerCase();
+      const taggedRows = await this.prisma.$queryRaw<Array<{ transaction_id: number }>>`
+        SELECT DISTINCT tt.transaction_id
+        FROM transaction_tags tt
+        INNER JOIN tags t ON t.id = tt.tag_id
+        WHERE t.user_id = ${userId}
+          AND t.name LIKE ${`%${normalizedTag}%`}
+      `;
+      const transactionIds = taggedRows.map((row) => row.transaction_id);
+
+      where.id = transactionIds.length > 0 ? { in: transactionIds } : { in: [] };
+    }
+
+    const shouldPaginate = query.page !== undefined || query.limit !== undefined;
+    const page = Math.max(1, query.page ?? 1);
+    const limit = Math.min(100, Math.max(1, query.limit ?? 10));
+
     const transactionsList = await this.prisma.transactions.findMany({
-      where: {
-        wallet_id: walletId ?? { in: walletIds },
-      },
+      where,
       orderBy: { transaction_date: 'desc' },
       select: this.transactionSelect,
+      ...(shouldPaginate
+        ? {
+            skip: (page - 1) * limit,
+            take: limit,
+          }
+        : {}),
     });
+    const data = await this.attachCategories(userId, transactionsList, walletCurrencyMap);
 
-    return this.attachCategories(userId, transactionsList, walletCurrencyMap);
+    if (!shouldPaginate) {
+      return data;
+    }
+
+    const total = await this.prisma.transactions.count({ where });
+    const summaryRows = await this.prisma.transactions.aggregate({
+      where,
+      _sum: { amount: true },
+    });
+    const filteredTransactions = await this.prisma.transactions.findMany({
+      where,
+      select: { amount: true },
+    });
+    const summary = filteredTransactions.reduce(
+      (totalValue, transaction) => {
+        const amount = Number(transaction.amount);
+
+        if (amount >= 0) {
+          totalValue.income += amount;
+        } else {
+          totalValue.expense += Math.abs(amount);
+        }
+
+        return totalValue;
+      },
+      { income: 0, expense: 0 },
+    );
+
+    return {
+      data,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+        income: summary.income,
+        expense: summary.expense,
+        net: Number(summaryRows._sum.amount ?? 0),
+      },
+    };
   }
 
   async create(userId: number, dto: CreateTransactionDto) {
@@ -244,6 +496,8 @@ export class TransactionsService {
           },
         },
       });
+
+      await this.syncTags(tx, userId, transaction.id, dto.tags);
 
       return transaction;
     });
@@ -323,21 +577,35 @@ export class TransactionsService {
         });
       }
 
-      return tx.transactions.update({
+      const transaction = await tx.transactions.update({
         where: { id },
         data: {
           wallet_id: nextWalletId,
           category_id: dto.category_id ?? undefined,
           amount: nextSignedAmount,
           note: dto.note ?? undefined,
-          receipt_image: dto.receipt_image ?? undefined,
+          receipt_image: Object.prototype.hasOwnProperty.call(dto, 'receipt_image')
+            ? (dto.receipt_image ?? null)
+            : undefined,
           transaction_date: dto.transaction_date
             ? new Date(dto.transaction_date)
             : undefined,
         },
         select: this.transactionSelect,
       });
+
+      await this.syncTags(tx, userId, id, dto.tags);
+
+      return transaction;
     });
+
+    if (
+      Object.prototype.hasOwnProperty.call(dto, 'receipt_image') &&
+      dto.receipt_image === null &&
+      current.receipt_image
+    ) {
+      await this.deleteReceiptFile(current.receipt_image);
+    }
 
     const walletCurrencyMap = new Map([[nextWallet.id, nextWallet.currency]]);
     const [normalized] = await this.attachCategories(
@@ -362,6 +630,10 @@ export class TransactionsService {
     const wallet = await this.getOwnedWallet(userId, current.wallet_id);
 
     const deleted = await this.prisma.$transaction(async (tx) => {
+      await tx.transaction_tags.deleteMany({
+        where: { transaction_id: id },
+      });
+
       await tx.wallets.update({
         where: { id: current.wallet_id as number },
         data: {
@@ -383,6 +655,8 @@ export class TransactionsService {
       [deleted],
       walletCurrencyMap,
     );
+
+    await this.deleteReceiptFile(current.receipt_image);
 
     return normalized;
   }
@@ -406,6 +680,10 @@ export class TransactionsService {
       },
       select: this.transactionSelect,
     });
+
+    if (current.receipt_image && current.receipt_image !== filename) {
+      await this.deleteReceiptFile(current.receipt_image);
+    }
 
     const walletCurrencyMap = new Map([[wallet.id, wallet.currency]]);
     const [normalized] = await this.attachCategories(

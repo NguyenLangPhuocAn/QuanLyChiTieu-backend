@@ -19,13 +19,28 @@ DEALLOCATE PREPARE stmt;
 SET @sql := (
   SELECT IF(
     COUNT(*) = 0,
-    'ALTER TABLE password_resets ADD COLUMN token_hash VARCHAR(255) NULL AFTER token',
+    'ALTER TABLE password_resets ADD COLUMN selector VARCHAR(64) NULL AFTER email',
     'SELECT 1'
   )
   FROM INFORMATION_SCHEMA.COLUMNS
   WHERE TABLE_SCHEMA = @db_name
     AND TABLE_NAME = 'password_resets'
-    AND COLUMN_NAME = 'token_hash'
+    AND COLUMN_NAME = 'selector'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql := (
+  SELECT IF(
+    COUNT(*) = 0,
+    'ALTER TABLE password_resets ADD UNIQUE KEY password_resets_selector_key (selector)',
+    'SELECT 1'
+  )
+  FROM INFORMATION_SCHEMA.STATISTICS
+  WHERE TABLE_SCHEMA = @db_name
+    AND TABLE_NAME = 'password_resets'
+    AND INDEX_NAME = 'password_resets_selector_key'
 );
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
@@ -41,6 +56,21 @@ SET @sql := (
   WHERE TABLE_SCHEMA = @db_name
     AND TABLE_NAME = 'password_resets'
     AND COLUMN_NAME = 'used_at'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql := (
+  SELECT IF(
+    COUNT(*) > 0,
+    'ALTER TABLE password_resets DROP COLUMN token_hash',
+    'SELECT 1'
+  )
+  FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = @db_name
+    AND TABLE_NAME = 'password_resets'
+    AND COLUMN_NAME = 'token_hash'
 );
 PREPARE stmt FROM @sql;
 EXECUTE stmt;

@@ -30,8 +30,8 @@ model categories {
 model password_resets {
   id         Int       @id @default(autoincrement())
   email      String?   @db.VarChar(255)
+  selector   String?   @unique(map: "password_resets_selector_key") @db.VarChar(64)
   token      String?   @db.VarChar(255)
-  token_hash String?   @db.VarChar(255)
   expired_at DateTime? @db.DateTime(0)
   used_at    DateTime? @db.DateTime(0)
 }
@@ -82,6 +82,7 @@ model users {
   provider_id      String?     @db.VarChar(255)
   is_active        Boolean?    @default(true)
   must_change_password Boolean? @default(false)
+  profile_setup_completed Boolean? @default(false)
   created_at       DateTime?   @default(now()) @db.Timestamp(0)
 }
 
@@ -89,7 +90,7 @@ model refresh_tokens {
   id              Int       @id @default(autoincrement())
   user_id         Int
   jti             String    @unique(map: "jti") @db.VarChar(64)
-  token_hash      String    @db.VarChar(255)
+  token           String    @db.VarChar(255)
   expires_at      DateTime  @db.DateTime(0)
   revoked_at      DateTime? @db.DateTime(0)
   created_at      DateTime? @default(now()) @db.Timestamp(0)
@@ -101,6 +102,7 @@ model wallets {
   id           Int       @id @default(autoincrement())
   user_id      Int?
   name         String    @db.VarChar(50)
+  wallet_type  wallet_type @default(CASH)
   currency     String    @default("VND") @db.VarChar(10)
   balance      Decimal?  @default(0.00) @db.Decimal(15, 2)
   budget_limit Decimal?  @db.Decimal(15, 2)
@@ -118,4 +120,10 @@ enum users_role {
   BASIC
   PREMIUM
   ADMIN
+}
+
+enum wallet_type {
+  CASH
+  BANK
+  E_WALLET
 }

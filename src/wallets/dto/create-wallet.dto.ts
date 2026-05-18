@@ -8,6 +8,9 @@ import {
 } from 'class-validator';
 import { SUPPORTED_CURRENCIES } from '../../currency/currency.constants';
 
+export const WALLET_TYPES = ['CASH', 'BANK', 'E_WALLET'] as const;
+export type WalletType = (typeof WALLET_TYPES)[number];
+
 export class CreateWalletDto {
   @IsString({ message: 'Tên ví phải là chuỗi ký tự' })
   @IsNotEmpty({ message: 'Tên ví không được để trống' })
@@ -34,4 +37,11 @@ export class CreateWalletDto {
     message: `Tiền tệ chỉ hỗ trợ: ${SUPPORTED_CURRENCIES.join(', ')}`,
   })
   currency?: string;
+
+  @IsOptional()
+  @IsString({ message: 'Loại ví phải là chuỗi ký tự' })
+  @IsIn([...WALLET_TYPES], {
+    message: `Loại ví chỉ hỗ trợ: ${WALLET_TYPES.join(', ')}`,
+  })
+  wallet_type?: WalletType;
 }

@@ -5,6 +5,7 @@ import {
   Matches,
   IsDateString,
   IsUrl,
+  IsBoolean,
 } from 'class-validator';
 import { SUPPORTED_CURRENCIES } from '../../currency/currency.constants';
 
@@ -48,4 +49,8 @@ export class UpdateUserDto {
     message: `Tiền tệ mặc định chỉ hỗ trợ: ${SUPPORTED_CURRENCIES.join(', ')}`,
   })
   currency_default?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  profile_setup_completed?: boolean;
 }

@@ -10,6 +10,9 @@ import { WalletsModule } from './wallets/wallets.module';
 import { TransactionsModule } from './transactions/transactions.module';
 import { AdminModule } from './admin/admin.module';
 import { CurrencyModule } from './currency/currency.module';
+import { AuthModule } from './auth/auth.module';
+import { StatisticsModule } from './statistics/statistics.module';
+import { TagsModule } from './tags/tags.module';
 
 @Module({
   imports: [
@@ -28,7 +31,10 @@ import { CurrencyModule } from './currency/currency.module';
     CategoriesModule,
     WalletsModule,
     TransactionsModule,
+    TagsModule,
+    StatisticsModule,
     AdminModule,
+    AuthModule,
   ],
   controllers: [AppController],
   providers: [AppService],

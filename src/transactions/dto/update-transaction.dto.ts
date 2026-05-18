@@ -1,4 +1,5 @@
 import {
+  IsArray,
   IsDateString,
   IsEnum,
   IsInt,
@@ -19,7 +20,7 @@ export class UpdateTransactionDto {
 
   @IsOptional()
   @Matches(/^\d+(\.\d{1,2})?$/, {
-    message: 'Số tiền phải là số không âm và tối đa 2 chữ số thập phân',
+    message: 'Số tiền phải lớn hơn 0 và tối đa 2 chữ số thập phân',
   })
   amount?: string;
 
@@ -33,9 +34,14 @@ export class UpdateTransactionDto {
 
   @IsOptional()
   @IsString()
-  receipt_image?: string;
+  receipt_image?: string | null;
 
   @IsOptional()
   @IsDateString()
   transaction_date?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
 }

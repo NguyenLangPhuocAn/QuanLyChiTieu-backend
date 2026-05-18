@@ -21,13 +21,14 @@ import { diskStorage } from 'multer';
 import { extname, join } from 'path';
 import { JwtGuard } from '../auth/jwt.guard';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateTransactionDto } from './dto/create-transaction.dto';
+import { CreateTransactionDto, TransactionType } from './dto/create-transaction.dto';
 import { UpdateTransactionDto } from './dto/update-transaction.dto';
 import { TransactionsService } from './transactions.service';
 
 type AuthenticatedRequest = Request & {
   user: {
     userId: number;
+    role?: string | null;
   };
 };
 
@@ -50,7 +51,11 @@ export class TransactionsController {
     private prisma: PrismaService,
   ) {}
 
-  private async logAction(userId: number, action: string) {
+  private async logAction(userId: number, role: string | null | undefined, action: string) {
+    if (role !== 'ADMIN') {
+      return;
+    }
+
     await this.prisma.admin_logs.create({
       data: {
         admin_id: userId,
@@ -63,11 +68,28 @@ export class TransactionsController {
   findAll(
     @Req() req: AuthenticatedRequest,
     @Query('wallet_id') walletId?: string,
+    @Query('category_id') categoryId?: string,
+    @Query('type') type?: 'INCOME' | 'EXPENSE',
+    @Query('tag') tag?: string,
+    @Query('q') q?: string,
+    @Query('note') note?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
-    return this.transactionsService.findAll(
-      req.user.userId,
-      walletId ? Number(walletId) : undefined,
-    );
+    return this.transactionsService.findAll(req.user.userId, {
+      walletId: walletId ? Number(walletId) : undefined,
+      categoryId: categoryId ? Number(categoryId) : undefined,
+      type: type ? TransactionType[type] : undefined,
+      tag,
+      q,
+      note,
+      from,
+      to,
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
   }
 
   @Post()
@@ -82,6 +104,7 @@ export class TransactionsController {
 
     await this.logAction(
       req.user.userId,
+      req.user.role,
       `Tạo giao dịch (id: ${transaction.id})`,
     );
 
@@ -100,7 +123,7 @@ export class TransactionsController {
       dto,
     );
 
-    await this.logAction(req.user.userId, `Cập nhật giao dịch (id: ${id})`);
+    await this.logAction(req.user.userId, req.user.role, `Cập nhật giao dịch (id: ${id})`);
 
     return transaction;
   }
@@ -115,7 +138,7 @@ export class TransactionsController {
       id,
     );
 
-    await this.logAction(req.user.userId, `Xóa giao dịch (id: ${id})`);
+    await this.logAction(req.user.userId, req.user.role, `Xóa giao dịch (id: ${id})`);
 
     return transaction;
   }
@@ -160,6 +183,7 @@ export class TransactionsController {
 
     await this.logAction(
       req.user.userId,
+      req.user.role,
       `Upload ảnh hóa đơn giao dịch (id: ${id})`,
     );
 

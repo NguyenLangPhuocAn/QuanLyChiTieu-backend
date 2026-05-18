@@ -55,10 +55,12 @@ export class CategoriesService implements OnModuleInit {
       where: isSystem
         ? {
             name,
+            type: dto.type,
             is_system: true,
           }
         : {
             name,
+            type: dto.type,
             user_id: userId,
           },
     });
@@ -118,17 +120,20 @@ export class CategoriesService implements OnModuleInit {
     }
 
     const newName = dto.name?.trim().toLowerCase();
+    const nextType = dto.type ?? category.type;
 
     if (newName) {
       const existed = await this.prisma.categories.findFirst({
         where: category.is_system
           ? {
               name: newName,
+              type: nextType,
               is_system: true,
               NOT: { id },
             }
           : {
               name: newName,
+              type: nextType,
               user_id: category.user_id,
               NOT: { id },
             },

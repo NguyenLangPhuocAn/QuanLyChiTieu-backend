@@ -10,9 +10,9 @@ export class ResetPasswordDto {
   token!: string;
 
   @IsString()
-  @MinLength(6, { message: 'Password phải >= 6 ký tự' })
+  @MinLength(6, { message: 'Mật khẩu phải có ít nhất 6 ký tự' })
   @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])/, {
-    message: 'Password phải có chữ hoa, chữ thường, số và ký tự đặc biệt',
+    message: 'Mật khẩu phải có chữ hoa, chữ thường, số và ký tự đặc biệt',
   })
   newPassword!: string;
 
@@ -22,9 +22,9 @@ export class ResetPasswordDto {
 
 export class CompletePasswordSetupDto {
   @IsString()
-  @MinLength(6, { message: 'Password phải >= 6 ký tự' })
+  @MinLength(6, { message: 'Mật khẩu phải có ít nhất 6 ký tự' })
   @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])/, {
-    message: 'Password phải có chữ hoa, chữ thường, số và ký tự đặc biệt',
+    message: 'Mật khẩu phải có chữ hoa, chữ thường, số và ký tự đặc biệt',
   })
   newPassword!: string;
 

@@ -21,6 +21,7 @@ const monthLabels = [
 type InsightSeverity = 'danger' | 'warning' | 'success';
 
 type ConvertedTransaction = {
+  id: number;
   amount: number;
   transaction_date: Date;
   category_id?: number | null;
@@ -340,6 +341,42 @@ export class AdminService {
       .trim();
   }
 
+  private getLogActionGroup(action?: string | null) {
+    const normalized = this.normalizeLogText(action);
+
+    if (normalized.includes('dang nhap')) return 'LOGIN';
+    if (normalized.includes('dang xuat')) return 'LOGOUT';
+    if (normalized.includes('upload')) return 'UPLOAD';
+    if (normalized.includes('xoa') || normalized.includes('vo hieu hoa')) return 'DELETE';
+    if (
+      normalized.includes('cap nhat') ||
+      normalized.includes('sua') ||
+      normalized.includes('doi')
+    ) {
+      return 'UPDATE';
+    }
+    if (normalized.includes('tao') || normalized.includes('them')) return 'CREATE';
+
+    return 'ALL';
+  }
+
+  private getLogTargetGroup(action?: string | null) {
+    const normalized = this.normalizeLogText(action);
+
+    if (
+      normalized.includes('nguoi dung') ||
+      normalized.includes('user') ||
+      normalized.includes('mat khau') ||
+      normalized.includes('ho so')
+    ) {
+      return 'USER';
+    }
+
+    if (normalized.includes('danh muc')) return 'CATEGORY';
+
+    return 'ALL';
+  }
+
   private isImportantLog(action?: string | null) {
     const normalized = this.normalizeLogText(action);
 
@@ -454,6 +491,7 @@ export class AdminService {
 
   private async convertTransactions(
     transactions: Array<{
+      id: number;
       amount: Prisma.Decimal;
       transaction_date: Date;
       category_id?: number | null;
@@ -495,7 +533,18 @@ export class AdminService {
     });
   }
 
-  async getLogs() {
+  async getLogs(
+    query: {
+      page?: number;
+      limit?: number;
+      action?: string;
+      target?: string;
+      date?: string;
+      sort?: string;
+    } = {},
+  ) {
+    const page = Math.max(Number(query.page ?? 1), 1);
+    const limit = Math.min(Math.max(Number(query.limit ?? 10), 1), 100);
     const logs = await this.prisma.admin_logs.findMany({
       where: {
         NOT: [
@@ -505,17 +554,48 @@ export class AdminService {
           { action: { contains: 'chuyen tab' } },
         ],
       },
-      orderBy: { created_at: 'desc' },
-      take: 200,
+      orderBy: { created_at: query.sort === 'time_asc' ? 'asc' : 'desc' },
     });
 
-    return logs
+    const formattedLogs = logs
       .filter((log) => this.isImportantLog(log.action))
-      .slice(0, 50)
+      .filter((log) =>
+        query.action && query.action !== 'ALL'
+          ? this.getLogActionGroup(log.action) === query.action
+          : true,
+      )
+      .filter((log) =>
+        query.target && query.target !== 'ALL'
+          ? this.getLogTargetGroup(log.action) === query.target
+          : true,
+      )
+      .filter((log) =>
+        query.date
+          ? log.created_at?.toISOString().slice(0, 10) === query.date
+          : true,
+      )
       .map((log) => ({
         ...log,
         action: this.formatKnownLogAction(log.action),
       }));
+
+    if (!query.page && !query.limit) {
+      return formattedLogs.slice(0, 50);
+    }
+
+    const total = formattedLogs.length;
+    const totalPages = Math.max(Math.ceil(total / limit), 1);
+    const start = (page - 1) * limit;
+
+    return {
+      data: formattedLogs.slice(start, start + limit),
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages,
+      },
+    };
   }
 
   async getDashboard(adminUserId: number, date?: string, period?: string) {
@@ -609,6 +689,7 @@ export class AdminService {
           },
         },
         select: {
+          id: true,
           amount: true,
           transaction_date: true,
           category_id: true,
@@ -777,6 +858,46 @@ export class AdminService {
         ...wallet,
         name: walletNames.get(wallet.walletId) ?? `Ví #${wallet.walletId}`,
       }));
+    const selectedTransactionAmountById = new Map(
+      selectedPeriodTransactions.map((transaction) => [
+        transaction.id,
+        Math.abs(transaction.amount),
+      ]),
+    );
+    const selectedTransactionIds = Array.from(selectedTransactionAmountById.keys());
+    const transactionTagRows = selectedTransactionIds.length
+      ? await this.prisma.$queryRaw<Array<{ transaction_id: number; name: string }>>`
+          SELECT tt.transaction_id, t.name
+          FROM transaction_tags tt
+          JOIN tags t ON t.id = tt.tag_id
+          WHERE tt.transaction_id IN (${Prisma.join(selectedTransactionIds)})
+        `
+      : [];
+    const hotHashtagMap = new Map<
+      string,
+      { tag: string; total: number; count: number }
+    >();
+
+    transactionTagRows.forEach((row) => {
+      const tag = row.name.trim();
+
+      if (!tag) {
+        return;
+      }
+
+      const current = hotHashtagMap.get(tag) ?? {
+        tag,
+        total: 0,
+        count: 0,
+      };
+
+      current.total += selectedTransactionAmountById.get(row.transaction_id) ?? 0;
+      current.count += 1;
+      hotHashtagMap.set(tag, current);
+    });
+    const hotHashtags = Array.from(hotHashtagMap.values())
+      .sort((left, right) => right.count - left.count || right.total - left.total)
+      .slice(0, 10);
     const roleDistribution = [
       { name: 'Basic', value: basicUsers },
       { name: 'Premium', value: premiumUsers },
@@ -943,6 +1064,7 @@ export class AdminService {
         roleDistribution,
         topCategories,
         topWallets,
+        hotHashtags,
         walletHealth: [
           {
             name: 'Ví ổn',

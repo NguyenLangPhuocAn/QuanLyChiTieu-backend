@@ -30,12 +30,21 @@ type UserBase = {
   avatar?: string | null;
   currency_default?: string | null;
   must_change_password?: boolean | number | null;
+  profile_setup_completed?: boolean | number | null;
 };
 
 type AdminActor = {
   userId: number;
   email?: string;
   role?: string;
+};
+
+type UserListQuery = {
+  page?: number;
+  limit?: number;
+  keyword?: string;
+  role?: string;
+  sort?: string;
 };
 
 const SUPER_ADMIN_EMAIL = 'admin@gmail.com';
@@ -95,17 +104,17 @@ export class UsersService {
       throw new ForbiddenException('Không có quyền quản trị người dùng');
     }
 
-    const actorIsSuperAdmin = this.isSuperAdmin(actor);
+    const actorIsSuperAdmin = this.isSuperAdmin(actor) ? 1 : 0;
     const targetIsSuperAdmin = this.isSuperAdmin(target);
     const isSelf = actor.userId === target.id;
     const nextRole = dto.role;
 
-    if (targetIsSuperAdmin && deleting) {
-      throw new ForbiddenException('Không thể xóa tài khoản admin tổng');
+    if (isSelf) {
+      throw new ForbiddenException('Admin hãy cập nhật hồ sơ của mình ở mục Hồ sơ admin');
     }
 
-    if (deleting && isSelf) {
-      throw new ForbiddenException('Admin không thể tự xóa chính mình');
+    if (targetIsSuperAdmin && deleting) {
+      throw new ForbiddenException('Không thể xóa tài khoản admin tổng');
     }
 
     if (deleting && !actorIsSuperAdmin) {
@@ -127,9 +136,22 @@ export class UsersService {
     if (!actorIsSuperAdmin && nextRole !== undefined && nextRole !== target.role) {
       throw new ForbiddenException('Admin thường không được thay đổi role người dùng');
     }
+  }
 
-    if (isSelf && nextRole !== undefined && nextRole !== target.role) {
-      throw new ForbiddenException('Admin không được tự đổi role của mình');
+  private assertAdminCanViewUser(
+    actor: AdminActor | undefined,
+    target: { id: number; email: string; role: string | null },
+  ) {
+    if (!actor || actor.role !== 'ADMIN') {
+      throw new ForbiddenException('Không có quyền quản trị người dùng');
+    }
+
+    if (actor.userId === target.id) {
+      throw new ForbiddenException('Admin hãy xem hồ sơ của mình ở mục Hồ sơ admin');
+    }
+
+    if (!this.isSuperAdmin(actor) && target.role === 'ADMIN') {
+      throw new ForbiddenException('Admin thường không được xem admin khác');
     }
   }
 
@@ -145,6 +167,7 @@ export class UsersService {
       'role',
       'currency_default',
       'is_active',
+      'profile_setup_completed',
     ];
     const sanitized: Record<string, any> = {};
 
@@ -178,12 +201,12 @@ export class UsersService {
     const jti = randomUUID();
     const secret = randomBytes(48).toString('base64url');
     const refreshToken = `${jti}.${secret}`;
-    const tokenHash = await bcrypt.hash(refreshToken, 12);
+    const hashedToken = await bcrypt.hash(refreshToken, 12);
     const expiresAt = this.getRefreshTokenExpiry();
 
     await this.prisma.$executeRaw`
-      INSERT INTO refresh_tokens (user_id, jti, token_hash, expires_at)
-      VALUES (${userId}, ${jti}, ${tokenHash}, ${expiresAt})
+      INSERT INTO refresh_tokens (user_id, jti, token, expires_at)
+      VALUES (${userId}, ${jti}, ${hashedToken}, ${expiresAt})
     `;
 
     return {
@@ -271,21 +294,111 @@ export class UsersService {
     return `${baseUrl}${separator}token=${encodeURIComponent(token)}`;
   }
 
+  private createResetTokenParts() {
+    const selector = randomBytes(12).toString('base64url');
+    const secret = randomBytes(32).toString('base64url');
+
+    return {
+      selector,
+      secret,
+      publicToken: `${selector}.${secret}`,
+    };
+  }
+
+  private parseResetToken(token: string) {
+    const [selector, secret] = token.split('.');
+
+    if (!selector || !secret) {
+      throw new BadRequestException(
+        'Mã đặt lại mật khẩu không hợp lệ hoặc đã hết hạn',
+      );
+    }
+
+    return { selector, secret };
+  }
+
   // ================= GET ALL =================
-  async findAll() {
+  async findAll(actor?: AdminActor, query: UserListQuery = {}) {
+    if (!actor || actor.role !== 'ADMIN') {
+      throw new ForbiddenException('Không có quyền quản trị người dùng');
+    }
+
+    const actorIsSuperAdmin = this.isSuperAdmin(actor);
     const users = await this.prisma.$queryRaw<
       Array<{
         id: number;
         email: string;
         role: string | null;
+        full_name: string | null;
+        phone: string | null;
+        birthday: Date | null;
+        address: string | null;
+        avatar: string | null;
+        currency_default: string | null;
+        must_change_password: boolean | number | null;
+        profile_setup_completed: boolean | number | null;
       }>
     >`
-      SELECT id, email, role
+      SELECT id, email, role, full_name, phone, birthday, address, avatar,
+             currency_default, must_change_password, profile_setup_completed
       FROM users
       WHERE COALESCE(is_active, 1) = 1
+        AND id <> ${actor.userId}
+        AND (${actorIsSuperAdmin} = 1 OR role <> 'ADMIN')
     `;
 
-    return this.attachWalletCountList(users);
+    const keyword = query.keyword?.trim().toLowerCase();
+    const role = query.role?.trim().toUpperCase();
+    const filteredUsers = users.filter((user) => {
+      const matchesKeyword = keyword
+        ? [user.email, user.full_name, user.phone]
+            .some((value) => value?.toLowerCase().includes(keyword))
+        : true;
+      const matchesRole = role && role !== 'ALL' ? user.role === role : true;
+
+      return matchesKeyword && matchesRole;
+    });
+    const usersWithWalletCount = await this.attachWalletCountList(filteredUsers);
+    const sortedUsers = usersWithWalletCount.sort((left, right) => {
+      const sort = query.sort ?? 'name_asc';
+
+      if (sort === 'name_asc' || sort === 'name_desc') {
+        const leftName = left?.full_name || left?.email || '';
+        const rightName = right?.full_name || right?.email || '';
+        const result = leftName.localeCompare(rightName, 'vi');
+        return sort === 'name_desc' ? -result : result;
+      }
+
+      if (sort === 'birth_asc' || sort === 'birth_desc') {
+        const leftTime = left?.birthday ? new Date(left.birthday).getTime() : 0;
+        const rightTime = right?.birthday ? new Date(right.birthday).getTime() : 0;
+        const result = leftTime - rightTime;
+        return sort === 'birth_desc' ? -result : result;
+      }
+
+      const result = (left?.wallet_count ?? 0) - (right?.wallet_count ?? 0);
+      return sort === 'wallet_asc' ? result : -result;
+    });
+
+    if (!query.page && !query.limit) {
+      return sortedUsers;
+    }
+
+    const page = Math.max(Number(query.page ?? 1), 1);
+    const limit = Math.min(Math.max(Number(query.limit ?? 10), 1), 100);
+    const total = sortedUsers.length;
+    const totalPages = Math.max(Math.ceil(total / limit), 1);
+    const start = (page - 1) * limit;
+
+    return {
+      data: sortedUsers.slice(start, start + limit),
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages,
+      },
+    };
   }
 
   // ================= GET ONE =================
@@ -303,8 +416,36 @@ export class UsersService {
         avatar: true,
         currency_default: true,
         must_change_password: true,
+        profile_setup_completed: true,
       },
     });
+
+    return this.attachWalletCount(user);
+  }
+
+  async findOneForAdmin(id: number, actor?: AdminActor) {
+    const user = await this.prisma.users.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        full_name: true,
+        phone: true,
+        birthday: true,
+        address: true,
+        avatar: true,
+        currency_default: true,
+        must_change_password: true,
+        profile_setup_completed: true,
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException('Người dùng không tồn tại');
+    }
+
+    this.assertAdminCanViewUser(actor, user);
 
     return this.attachWalletCount(user);
   }
@@ -336,6 +477,7 @@ export class UsersService {
         currency_default: this.currencyService.normalizeCurrency(
           dto.currency_default,
         ),
+        profile_setup_completed: false,
       },
       select: {
         id: true,
@@ -381,6 +523,7 @@ export class UsersService {
           dto.currency_default,
         ),
         must_change_password: true,
+        profile_setup_completed: true,
       },
       select: {
         id: true,
@@ -393,6 +536,7 @@ export class UsersService {
         avatar: true,
         currency_default: true,
         must_change_password: true,
+        profile_setup_completed: true,
       },
     });
 
@@ -458,6 +602,7 @@ export class UsersService {
         avatar: true,
         currency_default: true,
         must_change_password: true,
+        profile_setup_completed: true,
       },
     });
 
@@ -497,6 +642,7 @@ export class UsersService {
         avatar: true,
         currency_default: true,
         must_change_password: true,
+        profile_setup_completed: true,
       },
     });
 
@@ -622,6 +768,111 @@ export class UsersService {
     };
   }
 
+  async loginWithGoogle(profile: {
+    email: string;
+    providerId: string;
+    fullName?: string | null;
+    avatar?: string | null;
+  }) {
+    const email = profile.email.trim().toLowerCase();
+    const user = await this.prisma.users.findUnique({
+      where: { email },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException(
+        'Email Google này chưa có tài khoản admin trong hệ thống',
+      );
+    }
+
+    if (user.is_active === false) {
+      throw new UnauthorizedException('Tài khoản đã bị khóa');
+    }
+
+    if (user.role !== 'ADMIN') {
+      throw new UnauthorizedException('Chỉ tài khoản admin mới được vào web admin');
+    }
+
+    await this.prisma.users.update({
+      where: { id: user.id },
+      data: {
+        provider: 'google',
+        provider_id: profile.providerId,
+        full_name: user.full_name ?? profile.fullName ?? null,
+        avatar: user.avatar ?? profile.avatar ?? null,
+      },
+    });
+
+    const tokens = await this.issueTokenPair({ id: user.id, role: user.role });
+
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: user.id,
+        action: 'Đăng nhập Google vào web admin',
+      },
+    });
+
+    return {
+      message: 'Đăng nhập Google thành công',
+      mustChangePassword: Boolean(user.must_change_password),
+      ...tokens,
+    };
+  }
+
+  async loginMobileWithGoogle(profile: {
+    email: string;
+    providerId: string;
+    fullName?: string | null;
+    avatar?: string | null;
+  }) {
+    const email = profile.email.trim().toLowerCase();
+    let user = await this.prisma.users.findUnique({
+      where: { email },
+    });
+
+    if (user?.is_active === false) {
+      throw new UnauthorizedException('Tài khoản đã bị khóa');
+    }
+
+    if (!user) {
+      const randomPassword = randomBytes(32).toString('base64url');
+      const hashedPassword = await bcrypt.hash(randomPassword, 10);
+
+      user = await this.prisma.users.create({
+        data: {
+          email,
+          password: hashedPassword,
+          role: 'BASIC',
+          provider: 'google',
+          provider_id: profile.providerId,
+          full_name: profile.fullName ?? null,
+          avatar: profile.avatar ?? null,
+          must_change_password: false,
+          profile_setup_completed: false,
+        },
+      });
+    } else {
+      user = await this.prisma.users.update({
+        where: { id: user.id },
+        data: {
+          provider: 'google',
+          provider_id: profile.providerId,
+          full_name: user.full_name ?? profile.fullName ?? null,
+          avatar: user.avatar ?? profile.avatar ?? null,
+          must_change_password: false,
+        },
+      });
+    }
+
+    const tokens = await this.issueTokenPair({ id: user.id, role: user.role });
+
+    return {
+      message: 'Đăng nhập Google thành công',
+      mustChangePassword: Boolean(user.must_change_password),
+      ...tokens,
+    };
+  }
+
   async refresh(refreshToken: string) {
     const jti = this.getJtiFromRefreshToken(refreshToken);
 
@@ -630,12 +881,12 @@ export class UsersService {
         Array<{
           id: number;
           user_id: number;
-          token_hash: string;
+          token: string;
           expires_at: Date;
           revoked_at: Date | null;
         }>
       >`
-        SELECT id, user_id, token_hash, expires_at, revoked_at
+        SELECT id, user_id, token, expires_at, revoked_at
         FROM refresh_tokens
         WHERE jti = ${jti}
         LIMIT 1
@@ -647,7 +898,7 @@ export class UsersService {
         throw new UnauthorizedException('Refresh token hết hạn hoặc đã bị thu hồi');
       }
 
-      const isMatch = await bcrypt.compare(refreshToken, stored.token_hash);
+      const isMatch = await bcrypt.compare(refreshToken, stored.token);
 
       if (!isMatch) {
         await tx.$executeRaw`
@@ -681,7 +932,7 @@ export class UsersService {
       const newJti = randomUUID();
       const secret = randomBytes(48).toString('base64url');
       const nextRefreshToken = `${newJti}.${secret}`;
-      const nextHash = await bcrypt.hash(nextRefreshToken, 12);
+      const hashedNextToken = await bcrypt.hash(nextRefreshToken, 12);
       const expiresAt = this.getRefreshTokenExpiry();
       const accessToken = this.signAccessToken({ id: user.id, role: user.role });
 
@@ -692,8 +943,8 @@ export class UsersService {
           AND revoked_at IS NULL
       `;
       await tx.$executeRaw`
-        INSERT INTO refresh_tokens (user_id, jti, token_hash, expires_at)
-        VALUES (${user.id}, ${newJti}, ${nextHash}, ${expiresAt})
+        INSERT INTO refresh_tokens (user_id, jti, token, expires_at)
+        VALUES (${user.id}, ${newJti}, ${hashedNextToken}, ${expiresAt})
       `;
 
       return {
@@ -734,89 +985,75 @@ export class UsersService {
     });
 
     const genericMessage =
-      'Nếu email tồn tại, hệ thống đã gửi hướng dẫn đặt lại mật khẩu.';
+      'Nếu email tồn tại, hệ thống đã gửi mật khẩu tạm thời.';
 
     if (!user || user.is_active === false) {
       return { message: genericMessage };
     }
 
-    const token = randomBytes(32).toString('base64url');
-    const tokenHash = await bcrypt.hash(token, 12);
-    const expiredAt = new Date();
-    expiredAt.setMinutes(expiredAt.getMinutes() + RESET_TOKEN_TTL_MINUTES);
-
-    await this.prisma.$executeRaw`
-      INSERT INTO password_resets (email, token, token_hash, expired_at)
-      VALUES (${normalizedEmail}, ${token}, ${tokenHash}, ${expiredAt})
-    `;
-
-    const resetLink = this.buildResetLink(token);
+    const temporaryPassword = this.generateTemporaryPassword();
+    const hashedPassword = await bcrypt.hash(temporaryPassword, 10);
     const mail = await this.sendMail(
       normalizedEmail,
-      'Đặt lại mật khẩu Quản lý chi tiêu',
+      'Mật khẩu tạm thời Quản lý chi tiêu',
       [
-        'Bạn vừa yêu cầu đặt lại mật khẩu.',
-        `Mã đặt lại mật khẩu: ${token}`,
-        `Liên kết: ${resetLink}`,
-        `Mã có hiệu lực trong ${RESET_TOKEN_TTL_MINUTES} phút.`,
+        'Bạn vừa yêu cầu cấp lại mật khẩu.',
+        `Mật khẩu tạm thời: ${temporaryPassword}`,
+        'Vui lòng đăng nhập bằng mật khẩu tạm thời này và đổi sang mật khẩu mới ngay sau khi vào hệ thống.',
       ].join('\n'),
     );
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.password_resets.deleteMany({
+        where: { email: normalizedEmail },
+      });
+
+      await tx.users.update({
+        where: { id: user.id },
+        data: {
+          password: hashedPassword,
+          must_change_password: true,
+        },
+      });
+
+      await tx.$executeRaw`
+        UPDATE refresh_tokens
+        SET revoked_at = NOW()
+        WHERE user_id = ${user.id}
+          AND revoked_at IS NULL
+      `;
+    });
 
     return {
       message: genericMessage,
       mail,
-      resetToken: process.env.NODE_ENV === 'production' ? undefined : token,
     };
   }
-
   async resetPassword(dto: ResetPasswordDto) {
     if (dto.newPassword !== dto.confirmPassword) {
       throw new BadRequestException('Mật khẩu xác nhận không khớp');
     }
 
-    const rows = await this.prisma.$queryRaw<
-      Array<{
-        id: number;
-        email: string | null;
-        token: string | null;
-        token_hash: string | null;
-        expired_at: Date | null;
-        used_at: Date | null;
-      }>
-    >`
-      SELECT id, email, token, token_hash, expired_at, used_at
-      FROM password_resets
-      WHERE used_at IS NULL
-        AND expired_at > NOW()
-      ORDER BY id DESC
-      LIMIT 20
-    `;
-    let matched:
-      | {
-          id: number;
-          email: string | null;
-          token: string | null;
-          token_hash: string | null;
-        }
-      | undefined;
+    const { selector, secret } = this.parseResetToken(dto.token);
+    const resetRequest = await this.prisma.password_resets.findUnique({
+      where: { selector },
+    });
 
-    for (const row of rows) {
-      const isMatch = row.token_hash
-        ? await bcrypt.compare(dto.token, row.token_hash)
-        : row.token === dto.token;
+    const isExpired =
+      !resetRequest?.expired_at || resetRequest.expired_at <= new Date();
+    const isAlreadyUsed = Boolean(resetRequest?.used_at);
+    const isMatch = resetRequest?.token
+      ? await bcrypt.compare(secret, resetRequest.token)
+      : false;
 
-      if (isMatch) {
-        matched = row;
-        break;
-      }
-    }
-
-    if (!matched?.email) {
-      throw new BadRequestException('Mã đặt lại mật khẩu không hợp lệ hoặc đã hết hạn');
+    if (!resetRequest?.email || isExpired || isAlreadyUsed || !isMatch) {
+      throw new BadRequestException(
+        'Mã đặt lại mật khẩu không hợp lệ hoặc đã hết hạn',
+      );
     }
 
     const user = await this.prisma.users.findUnique({
-      where: { email: matched.email },
+      where: { email: resetRequest.email },
       select: { id: true },
     });
 
@@ -827,17 +1064,17 @@ export class UsersService {
     const hashedPassword = await bcrypt.hash(dto.newPassword, 10);
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`
-        UPDATE users
-        SET password = ${hashedPassword},
-            must_change_password = 0
-        WHERE id = ${user.id}
-      `;
-      await tx.$executeRaw`
-        UPDATE password_resets
-        SET used_at = NOW()
-        WHERE id = ${matched.id}
-      `;
+      await tx.users.update({
+        where: { id: user.id },
+        data: {
+          password: hashedPassword,
+          must_change_password: false,
+        },
+      });
+      await tx.password_resets.update({
+        where: { id: resetRequest.id },
+        data: { used_at: new Date() },
+      });
       await tx.$executeRaw`
         UPDATE refresh_tokens
         SET revoked_at = NOW()
@@ -848,7 +1085,6 @@ export class UsersService {
 
     return { message: 'Đặt lại mật khẩu thành công' };
   }
-
   async completePasswordSetup(userId: number, dto: CompletePasswordSetupDto) {
     if (dto.newPassword !== dto.confirmPassword) {
       throw new BadRequestException('Mật khẩu xác nhận không khớp');
@@ -867,6 +1103,12 @@ export class UsersService {
     }
 
     const hashedPassword = await bcrypt.hash(dto.newPassword, 10);
+    const accessToken = this.signAccessToken({ id: user.id, role: user.role });
+    const jti = randomUUID();
+    const refreshSecret = randomBytes(48).toString('base64url');
+    const refreshToken = `${jti}.${refreshSecret}`;
+    const hashedRefreshToken = await bcrypt.hash(refreshToken, 12);
+    const refreshTokenExpiresAt = this.getRefreshTokenExpiry();
 
     await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`
@@ -881,11 +1123,20 @@ export class UsersService {
         WHERE user_id = ${userId}
           AND revoked_at IS NULL
       `;
+      await tx.$executeRaw`
+        INSERT INTO refresh_tokens (user_id, jti, token, expires_at)
+        VALUES (${user.id}, ${jti}, ${hashedRefreshToken}, ${refreshTokenExpiresAt})
+      `;
     });
 
     return {
-      message: 'Tạo mật khẩu mới thành công, vui lòng đăng nhập lại',
-      forceLogout: true,
+      message: 'Tạo mật khẩu mới thành công',
+      mustChangePassword: false,
+      accessToken,
+      token: accessToken,
+      expiresIn: ACCESS_TOKEN_TTL_SECONDS,
+      refreshToken,
+      refreshTokenExpiresAt,
     };
   }
 
@@ -951,6 +1202,7 @@ export class UsersService {
       'address',
       'avatar',
       'currency_default',
+      'profile_setup_completed',
     ];
     const sanitizedDto: Record<string, any> = {};
 
@@ -984,6 +1236,42 @@ export class UsersService {
         address: true,
         avatar: true,
         currency_default: true,
+        must_change_password: true,
+        profile_setup_completed: true,
+      },
+    });
+
+    return {
+      ...updatedUser,
+      wallet_count: await this.getWalletCount(userId),
+    };
+  }
+
+  async upgradeSelfToPremium(userId: number) {
+    const user = await this.prisma.users.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true },
+    });
+
+    if (!user) {
+      throw new NotFoundException('Người dùng không tồn tại');
+    }
+
+    const updatedUser = await this.prisma.users.update({
+      where: { id: userId },
+      data: user.role === 'BASIC' ? { role: 'PREMIUM' } : {},
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        full_name: true,
+        phone: true,
+        birthday: true,
+        address: true,
+        avatar: true,
+        currency_default: true,
+        must_change_password: true,
+        profile_setup_completed: true,
       },
     });
 

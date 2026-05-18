@@ -27,8 +27,22 @@ export class AdminController {
   }
 
   @Get('logs')
-  getLogs() {
-    return this.adminService.getLogs();
+  getLogs(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('action') action?: string,
+    @Query('target') target?: string,
+    @Query('date') date?: string,
+    @Query('sort') sort?: string,
+  ) {
+    return this.adminService.getLogs({
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+      action,
+      target,
+      date,
+      sort,
+    });
   }
 
   @Post('logs')

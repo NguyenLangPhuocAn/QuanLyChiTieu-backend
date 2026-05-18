@@ -1,8 +1,10 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
+import { loadEnvFile } from './env';
 
 async function bootstrap() {
+  loadEnvFile();
   const app = await NestFactory.create(AppModule);
   app.enableCors();
   // validate DTO

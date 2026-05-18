@@ -11,6 +11,7 @@
   ParseIntPipe,
   UseInterceptors,
   UploadedFile,
+  Query,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { UsersService } from './users.service';
@@ -143,6 +144,21 @@ export class UsersController {
       data: {
         admin_id: req.user.userId,
         action: `Cập nhật hồ sơ người dùng (id: ${req.user.userId})`,
+      },
+    });
+
+    return user;
+  }
+
+  @UseGuards(JwtGuard)
+  @Put('me/upgrade-premium')
+  async upgradeSelfToPremium(@Req() req: AuthenticatedRequest) {
+    const user = await this.usersService.upgradeSelfToPremium(req.user.userId);
+
+    await this.prisma.admin_logs.create({
+      data: {
+        admin_id: req.user.userId,
+        action: `Người dùng nâng cấp Premium (id: ${req.user.userId})`,
       },
     });
 
@@ -294,8 +310,21 @@ export class UsersController {
 
   @UseGuards(JwtGuard, AdminGuard)
   @Get()
-  getAll() {
-    return this.usersService.findAll();
+  getAll(
+    @Req() req: AuthenticatedRequest,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('keyword') keyword?: string,
+    @Query('role') role?: string,
+    @Query('sort') sort?: string,
+  ) {
+    return this.usersService.findAll(req.user, {
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+      keyword,
+      role,
+      sort,
+    });
   }
 
   @Post()
@@ -330,8 +359,11 @@ export class UsersController {
 
   @UseGuards(JwtGuard, AdminGuard)
   @Get('detail/:id')
-  getOne(@Param('id', ParseIntPipe) id: number) {
-    return this.usersService.findOne(id);
+  getOne(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.usersService.findOneForAdmin(id, req.user);
   }
 
   @UseGuards(JwtGuard, AdminGuard)
