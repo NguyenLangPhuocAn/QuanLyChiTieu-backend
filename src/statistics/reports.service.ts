@@ -43,13 +43,17 @@ import {
 import type { StatisticsPeriod } from './statistics.service';
 
 type ReportFormat = 'excel' | 'pdf';
+export type ReportPeriod = StatisticsPeriod | 'quarter' | 'custom';
+type ReportDateRange = { dateFrom?: string; dateTo?: string };
 
-const periodLabels: Record<StatisticsPeriod, string> = {
+const periodLabels: Record<ReportPeriod, string> = {
   all: 'tất cả',
   day: 'ngày',
   week: 'tuần',
   month: 'tháng',
+  quarter: 'quý',
   year: 'năm',
+  custom: 'khoảng tùy chọn',
 };
 
 type ReportTransaction = {
@@ -106,13 +110,63 @@ export class ReportsService {
     private currencyService: CurrencyService,
   ) {}
 
-  private getPeriodRange(period: StatisticsPeriod) {
+  private parseInputDate(value?: string) {
+    if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      return null;
+    }
+
+    const [year, month, day] = value.split('-').map(Number);
+    const date = new Date(year, month - 1, day);
+    if (
+      date.getFullYear() !== year ||
+      date.getMonth() !== month - 1 ||
+      date.getDate() !== day
+    ) {
+      return null;
+    }
+    date.setHours(0, 0, 0, 0);
+    return date;
+  }
+
+  private getPeriodRange(
+    period: ReportPeriod,
+    requestedRange: ReportDateRange = {},
+  ) {
     const now = new Date();
     const tomorrow = new Date(
       now.getFullYear(),
       now.getMonth(),
       now.getDate() + 1,
     );
+
+    if (requestedRange.dateFrom || requestedRange.dateTo) {
+      const requestedStart = requestedRange.dateFrom
+        ? this.parseInputDate(requestedRange.dateFrom)
+        : new Date(1970, 0, 1);
+      const requestedEnd = requestedRange.dateTo
+        ? this.parseInputDate(requestedRange.dateTo)
+        : new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+      if (!requestedStart || !requestedEnd) {
+        throw new BadRequestException('Khoảng thời gian báo cáo không hợp lệ');
+      }
+
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const safeEnd = requestedEnd > today ? today : requestedEnd;
+      if (requestedStart > safeEnd) {
+        throw new BadRequestException('Ngày bắt đầu phải trước ngày kết thúc');
+      }
+
+      const end = new Date(safeEnd);
+      end.setDate(end.getDate() + 1);
+      return { start: requestedStart, end: end > tomorrow ? tomorrow : end };
+    }
+
+    if (period === 'quarter' || period === 'custom') {
+      throw new BadRequestException(
+        'Vui lòng cung cấp khoảng thời gian cho báo cáo',
+      );
+    }
 
     if (period === 'all') {
       return { start: new Date(1970, 0, 1), end: tomorrow };
@@ -179,7 +233,8 @@ export class ReportsService {
   private async buildReportData(
     userId: number,
     role: string | null,
-    period: StatisticsPeriod,
+    period: ReportPeriod,
+    requestedRange: ReportDateRange = {},
   ) {
     if (role !== 'PREMIUM' && role !== 'ADMIN') {
       throw new ForbiddenException(
@@ -199,7 +254,7 @@ export class ReportsService {
     const displayCurrency = this.currencyService.normalizeCurrency(
       user.currency_default,
     );
-    const range = this.getPeriodRange(period);
+    const range = this.getPeriodRange(period, requestedRange);
     const wallets = await this.prisma.wallets.findMany({
       where: {
         user_id: userId,
@@ -342,10 +397,16 @@ export class ReportsService {
   async exportReport(
     userId: number,
     role: string | null,
-    period: StatisticsPeriod,
+    period: ReportPeriod,
     format: ReportFormat,
+    requestedRange: ReportDateRange = {},
   ) {
-    const data = await this.buildReportData(userId, role, period);
+    const data = await this.buildReportData(
+      userId,
+      role,
+      period,
+      requestedRange,
+    );
 
     if (format === 'excel') {
       return this.exportExcel(data);
@@ -357,8 +418,9 @@ export class ReportsService {
   async sendExcelReport(
     userId: number,
     role: string | null,
-    period: StatisticsPeriod,
+    period: ReportPeriod,
     email: string,
+    requestedRange: ReportDateRange = {},
   ) {
     const recipient = email.trim().toLowerCase();
 
@@ -366,7 +428,12 @@ export class ReportsService {
       throw new BadRequestException('Email nhận báo cáo chưa hợp lệ');
     }
 
-    const data = await this.buildReportData(userId, role, period);
+    const data = await this.buildReportData(
+      userId,
+      role,
+      period,
+      requestedRange,
+    );
     const report = await this.exportExcel(data);
     const rangeLabel = `${formatDate(data.range.start)} - ${formatDate(new Date(data.range.end.getTime() - 1))}`;
     const html = buildReportEmailHtml({

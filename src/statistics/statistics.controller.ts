@@ -12,6 +12,7 @@ import {
 import type { Request } from 'express';
 import { JwtGuard } from '../auth/jwt.guard';
 import { ReportsService } from './reports.service';
+import type { ReportPeriod } from './reports.service';
 import { StatisticsService } from './statistics.service';
 import type { StatisticsPeriod } from './statistics.service';
 
@@ -58,10 +59,17 @@ export class StatisticsController {
   @Get('report')
   exportReport(
     @Req() req: AuthenticatedRequest,
-    @Query('period') period?: StatisticsPeriod,
+    @Query('period') period?: ReportPeriod,
     @Query('format') format?: 'excel' | 'pdf',
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
   ) {
-    if (period && !['all', 'day', 'week', 'month', 'year'].includes(period)) {
+    if (
+      period &&
+      !['all', 'day', 'week', 'month', 'quarter', 'year', 'custom'].includes(
+        period,
+      )
+    ) {
       throw new BadRequestException('Kỳ thống kê không hợp lệ');
     }
 
@@ -74,17 +82,26 @@ export class StatisticsController {
       req.user.role ?? null,
       period ?? 'month',
       format ?? 'excel',
+      { dateFrom, dateTo },
     );
   }
 
   @Post('report/email')
   sendExcelReport(
     @Req() req: AuthenticatedRequest,
-    @Body() body: { email?: string; period?: StatisticsPeriod },
+    @Body()
+    body: {
+      email?: string;
+      period?: ReportPeriod;
+      dateFrom?: string;
+      dateTo?: string;
+    },
   ) {
     if (
       body.period &&
-      !['all', 'day', 'week', 'month', 'year'].includes(body.period)
+      !['all', 'day', 'week', 'month', 'quarter', 'year', 'custom'].includes(
+        body.period,
+      )
     ) {
       throw new BadRequestException('Kỳ thống kê không hợp lệ');
     }
@@ -98,6 +115,7 @@ export class StatisticsController {
       req.user.role ?? null,
       body.period ?? 'month',
       body.email,
+      { dateFrom: body.dateFrom, dateTo: body.dateTo },
     );
   }
 }

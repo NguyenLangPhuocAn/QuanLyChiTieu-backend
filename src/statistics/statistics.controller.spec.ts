@@ -6,13 +6,17 @@ import { StatisticsService } from './statistics.service';
 describe('StatisticsController', () => {
   const makeController = () => {
     const getUserStatistics = jest.fn();
+    const exportReport = jest.fn();
     const statisticsService = {
       getUserStatistics,
     } as unknown as jest.Mocked<StatisticsService>;
-    const reportsService = {} as unknown as jest.Mocked<ReportsService>;
+    const reportsService = {
+      exportReport,
+    } as unknown as jest.Mocked<ReportsService>;
 
     return {
       getUserStatistics,
+      exportReport,
       statisticsService,
       controller: new StatisticsController(statisticsService, reportsService),
     };
@@ -43,5 +47,24 @@ describe('StatisticsController', () => {
     );
 
     expect(getUserStatistics).toHaveBeenCalledWith(7, 'month');
+  });
+
+  it('forwards quarter report dates to the report service', () => {
+    const { controller, exportReport } = makeController();
+
+    void controller.exportReport(
+      { user: { userId: 7, role: 'PREMIUM' } } as Parameters<
+        StatisticsController['exportReport']
+      >[0],
+      'quarter',
+      'pdf',
+      '2026-04-01',
+      '2026-06-30',
+    );
+
+    expect(exportReport).toHaveBeenCalledWith(7, 'PREMIUM', 'quarter', 'pdf', {
+      dateFrom: '2026-04-01',
+      dateTo: '2026-06-30',
+    });
   });
 });

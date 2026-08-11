@@ -98,7 +98,10 @@ export class TransactionsService {
       throw new BadRequestException('Ngày lọc giao dịch không hợp lệ');
     }
 
-    const date = new Date(
+    // A transaction date is a calendar date, not a local timestamp. Build its
+    // canonical representation at UTC midnight so the host timezone cannot
+    // move YYYY-MM-DD to the previous day when Nest serializes it as JSON.
+    const date = new Date(Date.UTC(
       Number(match[1]),
       Number(match[2]) - 1,
       Number(match[3]),
@@ -106,13 +109,13 @@ export class TransactionsService {
       endOfDay ? 59 : 0,
       endOfDay ? 59 : 0,
       endOfDay ? 999 : 0,
-    );
+    ));
 
     if (
       Number.isNaN(date.getTime()) ||
-      date.getFullYear() !== Number(match[1]) ||
-      date.getMonth() !== Number(match[2]) - 1 ||
-      date.getDate() !== Number(match[3])
+      date.getUTCFullYear() !== Number(match[1]) ||
+      date.getUTCMonth() !== Number(match[2]) - 1 ||
+      date.getUTCDate() !== Number(match[3])
     ) {
       throw new BadRequestException('Ngày lọc giao dịch không hợp lệ');
     }
