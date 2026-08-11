@@ -19,8 +19,12 @@ import { JwtGuard } from '../auth/jwt.guard';
 import { CreateCategoryDto } from './dto/create-categories.dto';
 import { UpdateCategoryDto } from './dto/update-categories.dto';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { memoryStorage } from 'multer';
-import { PrismaService } from '../prisma/prisma.service';
+import { join } from 'path';
+import {
+  createImageUploadOptions,
+  deleteUploadedFile,
+  IMAGE_UPLOAD_LIMITS,
+} from '../common/upload/image-upload-options';
 
 type AuthenticatedRequest = Request & {
   user: {
@@ -29,22 +33,17 @@ type AuthenticatedRequest = Request & {
   };
 };
 
+const categoryIconTempUploadDir = join(
+  process.cwd(),
+  'uploads',
+  'tmp',
+  'category-icons',
+);
+
 @Controller('categories')
 @UseGuards(JwtGuard)
 export class CategoriesController {
-  constructor(
-    private categoriesService: CategoriesService,
-    private prisma: PrismaService,
-  ) {}
-
-  private async logAction(req: AuthenticatedRequest, action: string) {
-    await this.prisma.admin_logs.create({
-      data: {
-        admin_id: req.user.userId,
-        action,
-      },
-    });
-  }
+  constructor(private categoriesService: CategoriesService) {}
 
   @Post()
   async create(
@@ -52,11 +51,6 @@ export class CategoriesController {
     @Body() dto: CreateCategoryDto,
   ) {
     const category = await this.categoriesService.create(req.user.userId, dto);
-
-    await this.logAction(
-      req,
-      `Tạo danh mục (id: ${category.id})`,
-    );
 
     return category;
   }
@@ -78,11 +72,6 @@ export class CategoriesController {
       dto,
     );
 
-    await this.logAction(
-      req,
-      `Cập nhật danh mục (id: ${id})`,
-    );
-
     return category;
   }
 
@@ -93,29 +82,18 @@ export class CategoriesController {
   ) {
     const category = await this.categoriesService.remove(req.user.userId, id);
 
-    await this.logAction(
-      req,
-      `Xóa danh mục (id: ${category.id})`,
-    );
-
     return category;
   }
 
   @Post(':id/icon')
   @UseInterceptors(
-    FileInterceptor('file', {
-      storage: memoryStorage(),
-      fileFilter: (req, file, cb) => {
-        if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
-          return cb(
-            new BadRequestException('Chỉ cho phép tải lên tệp hình ảnh'),
-            false,
-          );
-        }
-
-        cb(null, true);
-      },
-    }),
+    FileInterceptor(
+      'file',
+      createImageUploadOptions({
+        destination: categoryIconTempUploadDir,
+        fileSize: IMAGE_UPLOAD_LIMITS.categoryIcon.fileSize,
+      }),
+    ),
   )
   async uploadIcon(
     @Req() req: AuthenticatedRequest,
@@ -126,16 +104,18 @@ export class CategoriesController {
       throw new BadRequestException('Vui lòng chọn tệp');
     }
 
-    const category = await this.categoriesService.uploadIcon(
-      req.user.userId,
-      id,
-      file,
-    );
+    let category: Awaited<ReturnType<CategoriesService['uploadIcon']>>;
 
-    await this.logAction(
-      req,
-      `Upload icon danh mục (id: ${category.id})`,
-    );
+    try {
+      category = await this.categoriesService.uploadIcon(
+        req.user.userId,
+        id,
+        file,
+      );
+    } catch (error) {
+      await deleteUploadedFile(file);
+      throw error;
+    }
 
     return category;
   }

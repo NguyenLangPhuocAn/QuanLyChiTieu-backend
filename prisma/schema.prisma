@@ -17,23 +17,30 @@ model admin_logs {
 }
 
 model categories {
-  id        Int             @id @default(autoincrement())
-  name      String          @db.VarChar(50)
-  type      categories_type
-  icon      String?         @db.VarChar(255)
-  is_system Boolean?        @default(true)
-  user_id   Int?
+  id              Int                      @id @default(autoincrement())
+  name            String                   @db.VarChar(50)
+  type            categories_type
+  cash_flow_group category_cash_flow_group @default(NORMAL)
+  icon            String?                  @db.VarChar(255)
+  is_system       Boolean?                 @default(true)
+  is_active       Boolean?                 @default(true)
+  deleted_at      DateTime?                @db.DateTime(0)
+  user_id         Int?
 
   @@index([user_id], map: "user_id")
 }
 
 model password_resets {
-  id         Int       @id @default(autoincrement())
-  email      String?   @db.VarChar(255)
-  selector   String?   @unique(map: "password_resets_selector_key") @db.VarChar(64)
-  token      String?   @db.VarChar(255)
-  expired_at DateTime? @db.DateTime(0)
-  used_at    DateTime? @db.DateTime(0)
+  id                     Int       @id @default(autoincrement())
+  email                  String?   @db.VarChar(255)
+  selector               String?   @unique(map: "password_resets_selector_key") @db.VarChar(64)
+  token                  String?   @db.VarChar(255)
+  expired_at             DateTime? @db.DateTime(0)
+  used_at                DateTime? @db.DateTime(0)
+  attempt_count          Int?      @default(0)
+  reset_token_hash       String?   @db.VarChar(255)
+  reset_token_expired_at DateTime? @db.DateTime(0)
+  reset_token_used_at    DateTime? @db.DateTime(0)
 }
 
 model tags {
@@ -54,66 +61,221 @@ model transaction_tags {
 }
 
 model transactions {
-  id               Int       @id @default(autoincrement())
-  wallet_id        Int?
-  category_id      Int?
-  amount           Decimal   @db.Decimal(15, 2)
-  note             String?   @db.Text
-  receipt_image    String?   @db.VarChar(255)
-  transaction_date DateTime  @db.DateTime(0)
-  created_at       DateTime? @default(now()) @db.Timestamp(0)
+  id                 Int       @id @default(autoincrement())
+  wallet_id          Int?
+  category_id        Int?
+  amount             Decimal   @db.Decimal(15, 2)
+  currency           String?   @db.VarChar(10)
+  converted_amount   Decimal?  @db.Decimal(15, 2)
+  converted_currency String?   @db.VarChar(10)
+  exchange_rate_used Decimal?  @db.Decimal(18, 8)
+  note               String?   @db.Text
+  receipt_image      String?   @db.VarChar(255)
+  transaction_date   DateTime  @db.DateTime(0)
+  created_at         DateTime? @default(now()) @db.Timestamp(0)
 
   @@index([category_id], map: "category_id")
   @@index([wallet_id], map: "wallet_id")
 }
 
+model budgets {
+  id           Int           @id @default(autoincrement())
+  user_id      Int
+  name         String        @db.VarChar(100)
+  wallet_id    Int
+  category_id  Int?
+  scope        budget_scope  @default(WALLET)
+  limit_amount Decimal       @db.Decimal(15, 2)
+  period       budget_period
+  start_date   DateTime      @db.DateTime(0)
+  end_date     DateTime      @db.DateTime(0)
+  is_active    Boolean?      @default(true)
+  deleted_at   DateTime?     @db.DateTime(0)
+  created_at   DateTime?     @default(now()) @db.Timestamp(0)
+  updated_at   DateTime?     @default(now()) @updatedAt @db.Timestamp(0)
+  user         users         @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "budgets_user_id_fkey")
+  wallet       wallets       @relation(fields: [wallet_id], references: [id], onDelete: Cascade, map: "budgets_wallet_id_fkey")
+
+  @@index([user_id], map: "budgets_user_id_idx")
+  @@index([wallet_id], map: "budgets_wallet_id_idx")
+  @@index([category_id], map: "budgets_category_id_idx")
+  @@index([wallet_id, start_date, end_date], map: "budgets_wallet_period_idx")
+  @@index([user_id, scope, wallet_id, category_id, period, start_date, end_date], map: "budgets_duplicate_lookup_idx")
+}
+
 model users {
-  id               Int         @id @default(autoincrement())
-  email            String      @unique(map: "email") @db.VarChar(255)
-  password         String      @db.VarChar(255)
-  full_name        String?     @db.VarChar(100)
-  birthday         DateTime?   @db.Date
-  phone            String?     @db.VarChar(15)
-  address          String?     @db.Text
-  avatar           String?     @db.VarChar(255)
-  role             users_role? @default(BASIC)
-  currency_default String?     @default("VND") @db.VarChar(10)
-  provider         String?     @default("local") @db.VarChar(50)
-  provider_id      String?     @db.VarChar(255)
-  is_active        Boolean?    @default(true)
-  must_change_password Boolean? @default(false)
-  profile_setup_completed Boolean? @default(false)
-  created_at       DateTime?   @default(now()) @db.Timestamp(0)
+  id                              Int                       @id @default(autoincrement())
+  email                           String                    @unique(map: "email") @db.VarChar(255)
+  password                        String                    @db.VarChar(255)
+  full_name                       String?                   @db.VarChar(100)
+  birthday                        DateTime?                 @db.Date
+  phone                           String?                   @db.VarChar(15)
+  address                         String?                   @db.Text
+  avatar                          String?                   @db.VarChar(255)
+  role                            users_role?               @default(BASIC)
+  currency_default                String?                   @default("VND") @db.VarChar(10)
+  provider                        String?                   @default("local") @db.VarChar(50)
+  provider_id                     String?                   @db.VarChar(255)
+  is_active                       Boolean?                  @default(true)
+  deleted_at                      DateTime?                 @db.DateTime(0)
+  must_change_password            Boolean?                  @default(false)
+  profile_setup_completed         Boolean?                  @default(false)
+  created_at                      DateTime?                 @default(now()) @db.Timestamp(0)
+  budgets                         budgets[]
+  loan_debts                      loan_debts[]
+  notification_settings           notification_settings?
+  notifications                   notifications[]
+  notification_broadcasts_created notification_broadcasts[] @relation("notification_broadcasts_admin")
 }
 
 model refresh_tokens {
-  id              Int       @id @default(autoincrement())
-  user_id         Int
-  jti             String    @unique(map: "jti") @db.VarChar(64)
-  token           String    @db.VarChar(255)
-  expires_at      DateTime  @db.DateTime(0)
-  revoked_at      DateTime? @db.DateTime(0)
-  created_at      DateTime? @default(now()) @db.Timestamp(0)
+  id         Int       @id @default(autoincrement())
+  user_id    Int
+  jti        String    @unique(map: "jti") @db.VarChar(64)
+  token      String    @db.VarChar(255)
+  expires_at DateTime  @db.DateTime(0)
+  revoked_at DateTime? @db.DateTime(0)
+  created_at DateTime? @default(now()) @db.Timestamp(0)
 
   @@index([user_id], map: "refresh_tokens_user_id_idx")
 }
 
 model wallets {
-  id           Int       @id @default(autoincrement())
-  user_id      Int?
-  name         String    @db.VarChar(50)
-  wallet_type  wallet_type @default(CASH)
-  currency     String    @default("VND") @db.VarChar(10)
-  balance      Decimal?  @default(0.00) @db.Decimal(15, 2)
-  budget_limit Decimal?  @db.Decimal(15, 2)
-  created_at   DateTime? @default(now()) @db.Timestamp(0)
+  id          Int         @id @default(autoincrement())
+  user_id     Int?
+  name        String      @db.VarChar(50)
+  wallet_type wallet_type @default(CASH)
+  currency    String      @default("VND") @db.VarChar(10)
+  balance     Decimal?    @default(0.00) @db.Decimal(15, 2)
+  is_active   Boolean?    @default(true)
+  deleted_at  DateTime?   @db.DateTime(0)
+  created_at  DateTime?   @default(now()) @db.Timestamp(0)
+  budgets     budgets[]
 
   @@index([user_id], map: "user_id")
+}
+
+model notifications {
+  id           Int                      @id @default(autoincrement())
+  user_id      Int
+  broadcast_id Int?
+  type         notification_type
+  severity     notification_severity    @default(INFO)
+  title        String                   @db.VarChar(120)
+  message      String                   @db.Text
+  source_type  String?                  @db.VarChar(40)
+  source_id    Int?
+  dedupe_key   String                   @db.VarChar(191)
+  read_at      DateTime?                @db.DateTime(0)
+  deleted_at   DateTime?                @db.DateTime(0)
+  created_at   DateTime?                @default(now()) @db.Timestamp(0)
+  user         users                    @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "notifications_user_id_fkey")
+  broadcast    notification_broadcasts? @relation(fields: [broadcast_id], references: [id], onDelete: SetNull, map: "notifications_broadcast_id_fkey")
+
+  @@unique([user_id, dedupe_key], map: "notifications_user_dedupe_key")
+  @@index([user_id, deleted_at, read_at, created_at], map: "notifications_user_state_idx")
+  @@index([broadcast_id], map: "notifications_broadcast_id_idx")
+}
+
+model loan_debts {
+  id                     Int                  @id @default(autoincrement())
+  user_id                Int
+  person_name            String               @db.VarChar(100)
+  type                   loan_debt_type
+  principal_amount       Decimal              @db.Decimal(15, 2)
+  currency               String               @db.VarChar(10)
+  due_date               DateTime?            @db.DateTime(0)
+  note                   String?              @db.Text
+  opening_wallet_id      Int
+  opening_transaction_id Int
+  status                 loan_debt_status     @default(OPEN)
+  deleted_at             DateTime?            @db.DateTime(0)
+  created_at             DateTime?            @default(now()) @db.Timestamp(0)
+  updated_at             DateTime?            @default(now()) @updatedAt @db.Timestamp(0)
+  payments               loan_debt_payments[]
+  user                   users                 @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "loan_debts_user_id_fkey")
+
+  @@unique([opening_transaction_id], map: "loan_debts_opening_transaction_key")
+  @@index([user_id, deleted_at, status, due_date], map: "loan_debts_user_state_idx")
+  @@index([opening_wallet_id], map: "loan_debts_opening_wallet_idx")
+}
+
+model loan_debt_payments {
+  id             Int        @id @default(autoincrement())
+  loan_debt_id   Int
+  wallet_id      Int
+  transaction_id Int
+  amount         Decimal    @db.Decimal(15, 2)
+  payment_date   DateTime   @db.DateTime(0)
+  note           String?    @db.Text
+  deleted_at     DateTime?  @db.DateTime(0)
+  created_at     DateTime?  @default(now()) @db.Timestamp(0)
+  loan_debt      loan_debts @relation(fields: [loan_debt_id], references: [id], onDelete: Cascade, map: "loan_debt_payments_loan_debt_fkey")
+
+  @@unique([transaction_id], map: "loan_debt_payments_transaction_key")
+  @@index([loan_debt_id, deleted_at, payment_date], map: "loan_debt_payments_history_idx")
+  @@index([wallet_id], map: "loan_debt_payments_wallet_idx")
+}
+
+model notification_settings {
+  id                           Int       @id @default(autoincrement())
+  user_id                      Int       @unique(map: "notification_settings_user_id_key")
+  budget_alerts_enabled        Boolean?  @default(true)
+  budget_expiring_enabled      Boolean?  @default(true)
+  system_notifications_enabled Boolean?  @default(true)
+  created_at                   DateTime? @default(now()) @db.Timestamp(0)
+  updated_at                   DateTime? @default(now()) @updatedAt @db.Timestamp(0)
+  user                         users     @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "notification_settings_user_id_fkey")
+}
+
+model notification_broadcasts {
+  id            Int                   @id @default(autoincrement())
+  admin_id      Int?
+  title         String                @db.VarChar(120)
+  message       String                @db.Text
+  severity      notification_severity @default(INFO)
+  created_at    DateTime?             @default(now()) @db.Timestamp(0)
+  revoked_at    DateTime?             @db.DateTime(0)
+  admin         users?                @relation("notification_broadcasts_admin", fields: [admin_id], references: [id], onDelete: SetNull, map: "notification_broadcasts_admin_id_fkey")
+  notifications notifications[]
+
+  @@index([admin_id], map: "notification_broadcasts_admin_id_idx")
+  @@index([created_at], map: "notification_broadcasts_created_at_idx")
+}
+
+model exchange_rates {
+  id              Int       @id @default(autoincrement())
+  base_currency   String    @db.VarChar(10)
+  target_currency String    @db.VarChar(10)
+  rate            Decimal   @db.Decimal(18, 8)
+  source          String    @db.VarChar(80)
+  fetched_at      DateTime  @db.DateTime(0)
+  expires_at      DateTime  @db.DateTime(0)
+  created_at      DateTime? @default(now()) @db.Timestamp(0)
+  updated_at      DateTime? @default(now()) @updatedAt @db.Timestamp(0)
+
+  @@unique([base_currency, target_currency, source], map: "exchange_rates_pair_source_key")
+  @@index([base_currency, expires_at], map: "exchange_rates_base_expires_idx")
 }
 
 enum categories_type {
   INCOME
   EXPENSE
+}
+
+enum category_cash_flow_group {
+  NORMAL
+  LOAN_DEBT
+}
+
+enum loan_debt_type {
+  BORROWED
+  LENT
+}
+
+enum loan_debt_status {
+  OPEN
+  PAID
 }
 
 enum users_role {
@@ -126,4 +288,31 @@ enum wallet_type {
   CASH
   BANK
   E_WALLET
+}
+
+enum budget_period {
+  DAY
+  WEEK
+  MONTH
+  QUARTER
+  YEAR
+  CUSTOM
+}
+
+enum budget_scope {
+  WALLET
+  CATEGORY
+}
+
+enum notification_type {
+  BUDGET_WARNING
+  BUDGET_EXCEEDED
+  BUDGET_EXPIRING
+  SYSTEM
+}
+
+enum notification_severity {
+  INFO
+  WARNING
+  CRITICAL
 }

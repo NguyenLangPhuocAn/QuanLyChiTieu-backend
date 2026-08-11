@@ -19,6 +19,34 @@ import { UpdateCategoryDto } from './dto/update-categories.dto';
 export class CategoriesService implements OnModuleInit {
   constructor(private prisma: PrismaService) {}
 
+  private deduplicateVisibleCategories<
+    T extends {
+      id: number;
+      name: string;
+      type: string;
+      is_system?: boolean | null;
+      user_id?: number | null;
+    },
+  >(categories: T[]) {
+    const categoriesByKey = new Map<string, T>();
+
+    for (const category of categories) {
+      const scopeKey = category.is_system
+        ? 'system'
+        : `user:${category.user_id ?? 'none'}`;
+      const key = `${scopeKey}:${category.type}:${category.name.trim().toLowerCase()}`;
+      const existed = categoriesByKey.get(key);
+
+      if (!existed || category.id < existed.id) {
+        categoriesByKey.set(key, category);
+      }
+    }
+
+    return Array.from(categoriesByKey.values()).sort(
+      (left, right) => right.id - left.id,
+    );
+  }
+
   async onModuleInit() {
     const sourceDir = join(process.cwd(), '..', 'icons_categories');
     const copiedFiles = await copySeedCategoryIcons(sourceDir);
@@ -49,7 +77,7 @@ export class CategoriesService implements OnModuleInit {
     }
 
     const name = dto.name.trim().toLowerCase();
-    const isSystem = user?.role === 'ADMIN' && dto.is_system === true;
+    const isSystem = false;
 
     const existed = await this.prisma.categories.findFirst({
       where: isSystem
@@ -57,11 +85,15 @@ export class CategoriesService implements OnModuleInit {
             name,
             type: dto.type,
             is_system: true,
+            OR: [{ is_active: true }, { is_active: null }],
           }
         : {
             name,
             type: dto.type,
-            user_id: userId,
+            AND: [
+              { OR: [{ is_active: true }, { is_active: null }] },
+              { OR: [{ is_system: true }, { user_id: userId }] },
+            ],
           },
     });
 
@@ -73,6 +105,7 @@ export class CategoriesService implements OnModuleInit {
       data: {
         name,
         type: dto.type,
+        cash_flow_group: dto.cash_flow_group ?? 'NORMAL',
         is_system: isSystem,
         user_id: isSystem ? null : userId,
       },
@@ -85,24 +118,37 @@ export class CategoriesService implements OnModuleInit {
     });
 
     if (user?.role === 'BASIC') {
-      return this.prisma.categories.findMany({
-        where: { is_system: true },
-        orderBy: { id: 'desc' },
-      });
-    }
-
-    if (user?.role === 'PREMIUM') {
-      return this.prisma.categories.findMany({
+      const categories = await this.prisma.categories.findMany({
         where: {
-          OR: [{ is_system: true }, { user_id: userId }],
+          is_system: true,
+          OR: [{ is_active: true }, { is_active: null }],
         },
         orderBy: { id: 'desc' },
       });
+
+      return this.deduplicateVisibleCategories(categories);
     }
 
-    return this.prisma.categories.findMany({
+    if (user?.role === 'PREMIUM' || user?.role === 'ADMIN') {
+      const categories = await this.prisma.categories.findMany({
+        where: {
+          AND: [
+            { OR: [{ is_active: true }, { is_active: null }] },
+            { OR: [{ is_system: true }, { user_id: userId }] },
+          ],
+        },
+        orderBy: { id: 'desc' },
+      });
+
+      return this.deduplicateVisibleCategories(categories);
+    }
+
+    const categories = await this.prisma.categories.findMany({
+      where: { OR: [{ is_active: true }, { is_active: null }] },
       orderBy: { id: 'desc' },
     });
+
+    return this.deduplicateVisibleCategories(categories);
   }
 
   async update(userId: number, id: number, dto: UpdateCategoryDto) {
@@ -115,7 +161,11 @@ export class CategoriesService implements OnModuleInit {
       throw new NotFoundException('Danh mục không tồn tại');
     }
 
-    if (!dto.name && !dto.type) {
+    if (category.is_active === false) {
+      throw new NotFoundException('Danh mục không tồn tại');
+    }
+
+    if (!dto.name && !dto.type && !dto.cash_flow_group) {
       throw new ForbiddenException('Không có dữ liệu để cập nhật');
     }
 
@@ -129,12 +179,18 @@ export class CategoriesService implements OnModuleInit {
               name: newName,
               type: nextType,
               is_system: true,
+              OR: [{ is_active: true }, { is_active: null }],
               NOT: { id },
             }
           : {
               name: newName,
               type: nextType,
-              user_id: category.user_id,
+              AND: [
+                { OR: [{ is_active: true }, { is_active: null }] },
+                {
+                  OR: [{ is_system: true }, { user_id: category.user_id }],
+                },
+              ],
               NOT: { id },
             },
       });
@@ -142,16 +198,6 @@ export class CategoriesService implements OnModuleInit {
       if (existed) {
         throw new ForbiddenException('Danh mục đã tồn tại');
       }
-    }
-
-    if (user?.role === 'ADMIN') {
-      return this.prisma.categories.update({
-        where: { id },
-        data: {
-          name: newName ?? undefined,
-          type: dto.type,
-        },
-      });
     }
 
     if (user?.role === 'BASIC') {
@@ -171,6 +217,7 @@ export class CategoriesService implements OnModuleInit {
       data: {
         name: newName ?? undefined,
         type: dto.type,
+        cash_flow_group: dto.cash_flow_group,
       },
     });
   }
@@ -185,14 +232,8 @@ export class CategoriesService implements OnModuleInit {
       throw new NotFoundException('Danh mục không tồn tại');
     }
 
-    if (user?.role === 'ADMIN') {
-      const deletedCategory = await this.prisma.categories.delete({
-        where: { id },
-      });
-
-      await deleteCategoryIcon(category.icon);
-
-      return deletedCategory;
+    if (category.is_active === false) {
+      throw new NotFoundException('Danh mục không tồn tại');
     }
 
     if (user?.role === 'BASIC') {
@@ -207,13 +248,13 @@ export class CategoriesService implements OnModuleInit {
       throw new ForbiddenException('Không có quyền');
     }
 
-    const deletedCategory = await this.prisma.categories.delete({
+    return this.prisma.categories.update({
       where: { id },
+      data: {
+        is_active: false,
+        deleted_at: new Date(),
+      },
     });
-
-    await deleteCategoryIcon(category.icon);
-
-    return deletedCategory;
   }
 
   async uploadIcon(userId: number, id: number, file: Express.Multer.File) {
@@ -226,16 +267,8 @@ export class CategoriesService implements OnModuleInit {
       throw new NotFoundException('Danh mục không tồn tại');
     }
 
-    if (user?.role === 'ADMIN') {
-      const iconPath = await saveCategoryIcon(file);
-      const updatedCategory = await this.prisma.categories.update({
-        where: { id },
-        data: { icon: iconPath },
-      });
-
-      await deleteCategoryIcon(category.icon);
-
-      return updatedCategory;
+    if (category.is_active === false) {
+      throw new NotFoundException('Danh mục không tồn tại');
     }
 
     if (user?.role === 'BASIC') {

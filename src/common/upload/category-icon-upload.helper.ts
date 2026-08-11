@@ -1,10 +1,11 @@
-import { BadRequestException } from '@nestjs/common';
-import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
 import { copyFile, mkdir, readdir, unlink, writeFile } from 'fs/promises';
 import { extname, join, normalize } from 'path';
+import {
+  generateSafeUploadFilename,
+  validateImageUploadFile,
+} from './image-upload-options';
 
-const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const allowedExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 const categoryIconDir = join(process.cwd(), 'public', 'categories', 'icons');
 const categoryIconPrefix = 'categories/icons/';
@@ -18,24 +19,11 @@ export function getCategoryIconPublicPath(filename: string) {
 }
 
 export function validateCategoryIcon(file?: Express.Multer.File) {
-  if (!file) {
-    throw new BadRequestException('Vui lòng chọn tệp');
-  }
-
-  const extension = extname(file.originalname).toLowerCase();
-
-  if (
-    !allowedMimeTypes.has(file.mimetype) ||
-    !allowedExtensions.has(extension)
-  ) {
-    throw new BadRequestException('Chỉ cho phép tải lên tệp hình ảnh');
-  }
+  validateImageUploadFile(file);
 }
 
 export function generateCategoryIconFilename(file: Express.Multer.File) {
-  const extension = extname(file.originalname).toLowerCase();
-
-  return `${Date.now()}-${randomUUID()}${extension}`;
+  return generateSafeUploadFilename(file);
 }
 
 export async function saveCategoryIcon(file: Express.Multer.File) {
@@ -45,7 +33,14 @@ export async function saveCategoryIcon(file: Express.Multer.File) {
   const filename = generateCategoryIconFilename(file);
   const targetPath = join(categoryIconDir, filename);
 
-  await writeFile(targetPath, file.buffer);
+  if (file.buffer) {
+    await writeFile(targetPath, file.buffer);
+  } else if (file.path) {
+    await copyFile(file.path, targetPath);
+    await unlink(file.path).catch(() => undefined);
+  } else {
+    validateImageUploadFile(undefined);
+  }
 
   return getCategoryIconPublicPath(filename);
 }

@@ -52,10 +52,15 @@ export class GoogleController {
 
   @Get('google/callback')
   @Redirect()
-  async googleCallback(@Query('code') code?: string, @Query('error') error?: string) {
+  async googleCallback(
+    @Query('code') code?: string,
+    @Query('error') error?: string,
+  ) {
     try {
       if (error) {
-        throw new UnauthorizedException(error);
+        throw new UnauthorizedException(
+          'Không thể đăng nhập bằng Google. Vui lòng thử lại.',
+        );
       }
 
       if (!code) {
@@ -71,17 +76,21 @@ export class GoogleController {
       });
 
       const redirectUrl = new URL(this.getWebAdminUrl('/login'));
-      redirectUrl.searchParams.set('token', result.accessToken);
-      redirectUrl.searchParams.set('refreshToken', result.refreshToken);
-      redirectUrl.searchParams.set(
+      const redirectParams = new URLSearchParams();
+      redirectParams.set('token', result.accessToken);
+      redirectParams.set('refreshToken', result.refreshToken);
+      redirectParams.set(
         'mustChangePassword',
         result.mustChangePassword ? '1' : '0',
       );
+      redirectUrl.hash = redirectParams.toString();
 
       return { url: redirectUrl.toString() };
     } catch (caughtError) {
       const message =
-        caughtError instanceof Error ? caughtError.message : 'Đăng nhập Google thất bại';
+        caughtError instanceof Error
+          ? caughtError.message
+          : 'Không thể đăng nhập bằng Google. Vui lòng thử lại.';
       return this.redirectWithError(message);
     }
   }
@@ -128,7 +137,9 @@ export class GoogleController {
 
     if (!tokenResponse.ok || !tokenData.id_token) {
       throw new UnauthorizedException(
-        tokenData.error_description || tokenData.error || 'Không lấy được Google token',
+        tokenData.error_description ||
+          tokenData.error ||
+          'Không lấy được Google token',
       );
     }
 
@@ -146,7 +157,9 @@ export class GoogleController {
       profile.email_verified === false ||
       profile.email_verified === 'false'
     ) {
-      throw new UnauthorizedException('Google email không hợp lệ hoặc chưa xác minh');
+      throw new UnauthorizedException(
+        'Google email không hợp lệ hoặc chưa xác minh',
+      );
     }
 
     return profile;

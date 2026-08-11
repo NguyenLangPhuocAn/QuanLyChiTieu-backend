@@ -1,9 +1,10 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { isNormalCashFlow } from '../common/finance/cash-flow-classification';
 import { CurrencyService } from '../currency/currency.service';
 import { PrismaService } from '../prisma/prisma.service';
 
-export type StatisticsPeriod = 'day' | 'week' | 'month' | 'year';
+export type StatisticsPeriod = 'all' | 'day' | 'week' | 'month' | 'year';
 
 type WalletRow = {
   id: number;
@@ -15,7 +16,19 @@ type RawTransaction = {
   wallet_id: number | null;
   category_id: number | null;
   amount: Prisma.Decimal;
+  currency?: string | null;
+  converted_amount?: Prisma.Decimal | null;
+  converted_currency?: string | null;
+  exchange_rate_used?: Prisma.Decimal | null;
   transaction_date: Date;
+};
+
+type CategoryMeta = {
+  id: number;
+  name: string;
+  type: string;
+  cash_flow_group?: string | null;
+  icon: string | null;
 };
 
 @Injectable()
@@ -27,13 +40,26 @@ export class StatisticsService {
 
   private getPeriodRange(period: StatisticsPeriod, offset = 0) {
     const now = new Date();
+    const tomorrow = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() + 1,
+    );
+
+    if (period === 'all') {
+      return { start: new Date(1970, 0, 1), end: tomorrow };
+    }
 
     if (period === 'day') {
-      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset);
+      const start = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + offset,
+      );
       start.setHours(0, 0, 0, 0);
       const end = new Date(start);
       end.setDate(end.getDate() + 1);
-      return { start, end };
+      return { start, end: end > tomorrow ? tomorrow : end };
     }
 
     if (period === 'week') {
@@ -43,18 +69,18 @@ export class StatisticsService {
       start.setHours(0, 0, 0, 0);
       const end = new Date(start);
       end.setDate(end.getDate() + 7);
-      return { start, end };
+      return { start, end: end > tomorrow ? tomorrow : end };
     }
 
     if (period === 'year') {
       const start = new Date(now.getFullYear() + offset, 0, 1);
       const end = new Date(now.getFullYear() + offset + 1, 0, 1);
-      return { start, end };
+      return { start, end: end > tomorrow ? tomorrow : end };
     }
 
     const start = new Date(now.getFullYear(), now.getMonth() + offset, 1);
     const end = new Date(now.getFullYear(), now.getMonth() + offset + 1, 1);
-    return { start, end };
+    return { start, end: end > tomorrow ? tomorrow : end };
   }
 
   private getBucketLabel(date: Date, period: StatisticsPeriod) {
@@ -65,15 +91,26 @@ export class StatisticsService {
     return `T${date.getMonth() + 1}`;
   }
 
-  private async convertAmount(
-    amount: Prisma.Decimal,
+  private async convertTransactionAmount(
+    transaction: RawTransaction,
     walletCurrency: string,
     targetCurrency: string,
   ) {
+    const target = this.currencyService.normalizeCurrency(targetCurrency);
+
+    if (
+      transaction.converted_amount &&
+      transaction.converted_currency &&
+      this.currencyService.normalizeCurrency(transaction.converted_currency) ===
+        target
+    ) {
+      return Math.abs(Number(transaction.converted_amount));
+    }
+
     const converted = await this.currencyService.convertAmount(
-      amount.abs(),
-      walletCurrency,
-      targetCurrency,
+      new Prisma.Decimal(transaction.amount).abs(),
+      transaction.currency ?? walletCurrency,
+      target,
     );
 
     return converted.amount;
@@ -89,14 +126,18 @@ export class StatisticsService {
       throw new NotFoundException('Không tìm thấy người dùng');
     }
 
-    const displayCurrency = this.currencyService.normalizeCurrency(user.currency_default);
+    const displayCurrency = this.currencyService.normalizeCurrency(
+      user.currency_default,
+    );
     const wallets = await this.prisma.$queryRaw<WalletRow[]>`
       SELECT id, currency
       FROM wallets
       WHERE user_id = ${userId}
     `;
     const walletIds = wallets.map((wallet) => wallet.id);
-    const walletCurrencyMap = new Map(wallets.map((wallet) => [wallet.id, wallet.currency]));
+    const walletCurrencyMap = new Map(
+      wallets.map((wallet) => [wallet.id, wallet.currency]),
+    );
     const currentRange = this.getPeriodRange(period);
     const previousRange = this.getPeriodRange(period, -1);
     const yearStart = new Date(currentRange.start.getFullYear(), 0, 1);
@@ -115,6 +156,10 @@ export class StatisticsService {
             wallet_id: true,
             category_id: true,
             amount: true,
+            currency: true,
+            converted_amount: true,
+            converted_currency: true,
+            exchange_rate_used: true,
             transaction_date: true,
           },
         })
@@ -133,6 +178,10 @@ export class StatisticsService {
             wallet_id: true,
             category_id: true,
             amount: true,
+            currency: true,
+            converted_amount: true,
+            converted_currency: true,
+            exchange_rate_used: true,
             transaction_date: true,
           },
         })
@@ -147,18 +196,28 @@ export class StatisticsService {
         transaction.transaction_date >= previousRange.start &&
         transaction.transaction_date < previousRange.end,
     );
-    const categoryIds = currentTransactions
+    const categoryIds = [...transactions, ...trendTransactions]
       .map((transaction) => transaction.category_id)
       .filter((id): id is number => id !== null);
     const categories = categoryIds.length
       ? await this.prisma.categories.findMany({
-          where: { id: { in: categoryIds } },
-          select: { id: true, name: true, type: true, icon: true },
+          where: { id: { in: [...new Set(categoryIds)] } },
+          select: {
+            id: true,
+            name: true,
+            type: true,
+            cash_flow_group: true,
+            icon: true,
+          },
         })
       : [];
-    const categoryMap = new Map(categories.map((category) => [category.id, category]));
+    const categoryMap = new Map(
+      categories.map((category) => [category.id, category as CategoryMeta]),
+    );
     const tagRows = currentTransactions.length
-      ? await this.prisma.$queryRaw<Array<{ transaction_id: number; name: string }>>`
+      ? await this.prisma.$queryRaw<
+          Array<{ transaction_id: number; name: string }>
+        >`
           SELECT tt.transaction_id, t.name
           FROM transaction_tags tt
           INNER JOIN tags t ON t.id = tt.tag_id
@@ -169,37 +228,48 @@ export class StatisticsService {
     const tagMap = new Map<number, string[]>();
 
     tagRows.forEach((row) => {
-      tagMap.set(row.transaction_id, [...(tagMap.get(row.transaction_id) ?? []), row.name]);
+      tagMap.set(row.transaction_id, [
+        ...(tagMap.get(row.transaction_id) ?? []),
+        row.name,
+      ]);
     });
 
     const summarize = async (items: RawTransaction[]) => {
       let income = 0;
       let expense = 0;
+      let transactionCount = 0;
+      let expenseCount = 0;
 
       for (const item of items) {
+        const category = item.category_id
+          ? categoryMap.get(item.category_id)
+          : null;
+
+        if (!isNormalCashFlow(category)) {
+          continue;
+        }
+
         const signedAmount = new Prisma.Decimal(item.amount);
-        const amount = await this.convertAmount(
-          signedAmount,
+        const amount = await this.convertTransactionAmount(
+          item,
           walletCurrencyMap.get(item.wallet_id ?? 0) ?? 'VND',
           displayCurrency,
         );
+        transactionCount += 1;
 
         if (signedAmount.greaterThanOrEqualTo(0)) {
           income += amount;
         } else {
           expense += amount;
+          expenseCount += 1;
         }
       }
-
-      const expenseCount = items.filter((item) =>
-        new Prisma.Decimal(item.amount).lessThan(0),
-      ).length;
 
       return {
         income,
         expense,
         net: income - expense,
-        transactionCount: items.length,
+        transactionCount,
         expenseCount,
         averageExpense: expenseCount > 0 ? expense / expenseCount : 0,
       };
@@ -207,26 +277,48 @@ export class StatisticsService {
 
     const summary = await summarize(currentTransactions);
     const previousSummary = await summarize(previousTransactions);
-    const categoryTotals = new Map<number, { total: number; name: string; icon: string | null }>();
+    const categoryTotals = new Map<
+      number,
+      { total: number; name: string; icon: string | null }
+    >();
     const tagTotals = new Map<string, { total: number; count: number }>();
     const chartTotals = new Map<string, { income: number; expense: number }>();
-    const monthlyTrend = new Map<string, { income: number; expense: number; net: number }>();
+    const monthlyTrend = new Map<
+      string,
+      { income: number; expense: number; net: number }
+    >();
     let biggestExpense = 0;
     let biggestExpenseCategory: string | null = null;
 
-    for (let month = 0; month < 12; month += 1) {
+    const trendMonthCount =
+      currentRange.start.getFullYear() === new Date().getFullYear()
+        ? new Date().getMonth() + 1
+        : 12;
+    for (let month = 0; month < trendMonthCount; month += 1) {
       monthlyTrend.set(`T${month + 1}`, { income: 0, expense: 0, net: 0 });
     }
 
     for (const transaction of trendTransactions) {
+      const category = transaction.category_id
+        ? categoryMap.get(transaction.category_id)
+        : null;
+
+      if (!isNormalCashFlow(category)) {
+        continue;
+      }
+
       const signedAmount = new Prisma.Decimal(transaction.amount);
-      const amount = await this.convertAmount(
-        signedAmount,
+      const amount = await this.convertTransactionAmount(
+        transaction,
         walletCurrencyMap.get(transaction.wallet_id ?? 0) ?? 'VND',
         displayCurrency,
       );
       const label = `T${transaction.transaction_date.getMonth() + 1}`;
-      const current = monthlyTrend.get(label) ?? { income: 0, expense: 0, net: 0 };
+      const current = monthlyTrend.get(label) ?? {
+        income: 0,
+        expense: 0,
+        net: 0,
+      };
 
       if (signedAmount.greaterThanOrEqualTo(0)) {
         current.income += amount;
@@ -240,9 +332,17 @@ export class StatisticsService {
     }
 
     for (const transaction of currentTransactions) {
+      const category = transaction.category_id
+        ? categoryMap.get(transaction.category_id)
+        : null;
+
+      if (!isNormalCashFlow(category)) {
+        continue;
+      }
+
       const signedAmount = new Prisma.Decimal(transaction.amount);
-      const amount = await this.convertAmount(
-        signedAmount,
+      const amount = await this.convertTransactionAmount(
+        transaction,
         walletCurrencyMap.get(transaction.wallet_id ?? 0) ?? 'VND',
         displayCurrency,
       );
@@ -253,10 +353,6 @@ export class StatisticsService {
         chart.income += amount;
       } else {
         chart.expense += amount;
-        const category = transaction.category_id
-          ? categoryMap.get(transaction.category_id)
-          : null;
-
         if (amount > biggestExpense) {
           biggestExpense = amount;
           biggestExpenseCategory = category?.name ?? null;
@@ -306,7 +402,11 @@ export class StatisticsService {
       comparison: {
         expense_change_percent:
           previousSummary.expense > 0
-            ? Math.round(((summary.expense - previousSummary.expense) / previousSummary.expense) * 100)
+            ? Math.round(
+                ((summary.expense - previousSummary.expense) /
+                  previousSummary.expense) *
+                  100,
+              )
             : null,
       },
       chart: [...chartTotals.entries()].map(([label, value]) => ({

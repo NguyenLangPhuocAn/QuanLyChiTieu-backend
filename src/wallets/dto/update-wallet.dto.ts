@@ -1,4 +1,10 @@
-import { IsIn, IsOptional, IsString, MaxLength, Matches } from 'class-validator';
+﻿import {
+  IsIn,
+  IsOptional,
+  IsString,
+  MaxLength,
+  Matches,
+} from 'class-validator';
 import { SUPPORTED_CURRENCIES } from '../../currency/currency.constants';
 import { WALLET_TYPES, type WalletType } from './create-wallet.dto';
 
@@ -14,13 +20,6 @@ export class UpdateWalletDto {
     message: 'Số dư không được sửa trực tiếp sau khi ví đã tạo',
   })
   balance?: string;
-
-  @IsOptional()
-  @Matches(/^\d+(\.\d{1,2})?$/, {
-    message:
-      'Hạn mức chi tiêu phải là số không âm và có tối đa 2 chữ số thập phân',
-  })
-  budget_limit?: string;
 
   @IsOptional()
   @IsString({ message: 'Tiền tệ phải là chuỗi ký tự' })

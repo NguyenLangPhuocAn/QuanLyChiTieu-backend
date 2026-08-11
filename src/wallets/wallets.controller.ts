@@ -12,7 +12,6 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { JwtGuard } from '../auth/jwt.guard';
-import { PrismaService } from '../prisma/prisma.service';
 import { CreateWalletDto } from './dto/create-wallet.dto';
 import { UpdateWalletDto } from './dto/update-wallet.dto';
 import { WalletsService } from './wallets.service';
@@ -26,19 +25,7 @@ type AuthenticatedRequest = Request & {
 @Controller('wallets')
 @UseGuards(JwtGuard)
 export class WalletsController {
-  constructor(
-    private walletsService: WalletsService,
-    private prisma: PrismaService,
-  ) {}
-
-  private async logAction(userId: number, action: string) {
-    await this.prisma.admin_logs.create({
-      data: {
-        admin_id: userId,
-        action,
-      },
-    });
-  }
+  constructor(private walletsService: WalletsService) {}
 
   @Get()
   findAll(@Req() req: AuthenticatedRequest) {
@@ -57,8 +44,6 @@ export class WalletsController {
   async create(@Req() req: AuthenticatedRequest, @Body() dto: CreateWalletDto) {
     const wallet = await this.walletsService.create(req.user.userId, dto);
 
-    await this.logAction(req.user.userId, `Tạo ví (id: ${wallet.id})`);
-
     return wallet;
   }
 
@@ -70,8 +55,6 @@ export class WalletsController {
   ) {
     const wallet = await this.walletsService.update(req.user.userId, id, dto);
 
-    await this.logAction(req.user.userId, `Cập nhật ví (id: ${id})`);
-
     return wallet;
   }
 
@@ -81,8 +64,6 @@ export class WalletsController {
     @Param('id', ParseIntPipe) id: number,
   ) {
     const wallet = await this.walletsService.remove(req.user.userId, id);
-
-    await this.logAction(req.user.userId, `Xóa ví (id: ${id})`);
 
     return wallet;
   }

@@ -11,7 +11,11 @@ export class TagsService {
   constructor(private prisma: PrismaService) {}
 
   private normalizeName(name?: string) {
-    const normalized = name?.trim().replace(/^#+/, '').toLowerCase().slice(0, 50);
+    const normalized = name
+      ?.trim()
+      .replace(/^#+/, '')
+      .toLowerCase()
+      .slice(0, 50);
 
     if (!normalized) {
       throw new BadRequestException('Vui lòng nhập tên hashtag.');

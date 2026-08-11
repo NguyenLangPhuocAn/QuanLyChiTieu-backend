@@ -63,6 +63,66 @@ DEALLOCATE PREPARE stmt;
 
 SET @sql := (
   SELECT IF(
+    COUNT(*) = 0,
+    'ALTER TABLE password_resets ADD COLUMN attempt_count INT NULL DEFAULT 0 AFTER used_at',
+    'SELECT 1'
+  )
+  FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = @db_name
+    AND TABLE_NAME = 'password_resets'
+    AND COLUMN_NAME = 'attempt_count'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql := (
+  SELECT IF(
+    COUNT(*) = 0,
+    'ALTER TABLE password_resets ADD COLUMN reset_token_hash VARCHAR(255) NULL AFTER attempt_count',
+    'SELECT 1'
+  )
+  FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = @db_name
+    AND TABLE_NAME = 'password_resets'
+    AND COLUMN_NAME = 'reset_token_hash'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql := (
+  SELECT IF(
+    COUNT(*) = 0,
+    'ALTER TABLE password_resets ADD COLUMN reset_token_expired_at DATETIME NULL AFTER reset_token_hash',
+    'SELECT 1'
+  )
+  FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = @db_name
+    AND TABLE_NAME = 'password_resets'
+    AND COLUMN_NAME = 'reset_token_expired_at'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql := (
+  SELECT IF(
+    COUNT(*) = 0,
+    'ALTER TABLE password_resets ADD COLUMN reset_token_used_at DATETIME NULL AFTER reset_token_expired_at',
+    'SELECT 1'
+  )
+  FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = @db_name
+    AND TABLE_NAME = 'password_resets'
+    AND COLUMN_NAME = 'reset_token_used_at'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql := (
+  SELECT IF(
     COUNT(*) > 0,
     'ALTER TABLE password_resets DROP COLUMN token_hash',
     'SELECT 1'

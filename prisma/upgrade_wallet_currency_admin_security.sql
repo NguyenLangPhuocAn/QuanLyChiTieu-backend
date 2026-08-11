@@ -70,8 +70,8 @@ ON DUPLICATE KEY UPDATE
   currency_default = 'EUR',
   is_active = 1;
 
-INSERT INTO wallets (user_id, name, currency, balance, budget_limit)
-SELECT u.id, 'Premium EUR Wallet', 'EUR', 500, 300
+INSERT INTO wallets (user_id, name, currency, balance)
+SELECT u.id, 'Premium EUR Wallet', 'EUR', 500
 FROM users u
 WHERE u.email = 'premium.currency.test@gmail.com'
   AND NOT EXISTS (
@@ -79,8 +79,8 @@ WHERE u.email = 'premium.currency.test@gmail.com'
     WHERE w.user_id = u.id AND w.currency = 'EUR'
   );
 
-INSERT INTO wallets (user_id, name, currency, balance, budget_limit)
-SELECT u.id, 'Vi USD testregister', 'USD', 100, 80
+INSERT INTO wallets (user_id, name, currency, balance)
+SELECT u.id, 'Vi USD testregister', 'USD', 100
 FROM users u
 WHERE u.email = 'testregister@gmail.com'
   AND NOT EXISTS (

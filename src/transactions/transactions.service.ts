@@ -8,6 +8,7 @@ import { existsSync } from 'fs';
 import { unlink } from 'fs/promises';
 import { join, normalize } from 'path';
 import { CurrencyService } from '../currency/currency.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CreateTransactionDto,
@@ -20,6 +21,15 @@ type TransactionWithCategory = transactions & {
   tags?: string[];
 };
 
+type TransactionMoneyFields = Pick<
+  transactions,
+  | 'wallet_id'
+  | 'amount'
+  | 'currency'
+  | 'converted_amount'
+  | 'converted_currency'
+>;
+
 type OwnedWallet = {
   id: number;
   user_id: number | null;
@@ -30,6 +40,7 @@ type TransactionQuery = {
   walletId?: number;
   categoryId?: number;
   type?: TransactionType;
+  cashFlow?: 'normal' | 'loan_debt';
   tag?: string;
   q?: string;
   note?: string;
@@ -41,11 +52,14 @@ type TransactionQuery = {
 
 @Injectable()
 export class TransactionsService {
-  private readonly receiptUploadDir = normalize(join(process.cwd(), 'uploads', 'receipts'));
+  private readonly receiptUploadDir = normalize(
+    join(process.cwd(), 'uploads', 'receipts'),
+  );
 
   constructor(
     private prisma: PrismaService,
     private currencyService: CurrencyService,
+    private notificationsService: NotificationsService,
   ) {}
 
   private readonly transactionSelect = {
@@ -53,6 +67,10 @@ export class TransactionsService {
     wallet_id: true,
     category_id: true,
     amount: true,
+    currency: true,
+    converted_amount: true,
+    converted_currency: true,
+    exchange_rate_used: true,
     note: true,
     receipt_image: true,
     transaction_date: true,
@@ -102,6 +120,10 @@ export class TransactionsService {
     return date;
   }
 
+  private parseTransactionDate(value: string) {
+    return this.parseDateFilter(value);
+  }
+
   private getTypeFromSignedAmount(amount: Prisma.Decimal) {
     return amount.greaterThanOrEqualTo(0)
       ? TransactionType.INCOME
@@ -135,7 +157,10 @@ export class TransactionsService {
 
     const targetPath = normalize(join(this.receiptUploadDir, filename));
 
-    if (!targetPath.startsWith(this.receiptUploadDir) || !existsSync(targetPath)) {
+    if (
+      !targetPath.startsWith(this.receiptUploadDir) ||
+      !existsSync(targetPath)
+    ) {
       return;
     }
 
@@ -199,6 +224,91 @@ export class TransactionsService {
     return this.currencyService.normalizeCurrency(user?.currency_default);
   }
 
+  private async buildConversionSnapshot(
+    amount: Prisma.Decimal,
+    sourceCurrency: string,
+    targetCurrency: string,
+  ) {
+    const fromCurrency = this.currencyService.normalizeCurrency(sourceCurrency);
+    const toCurrency = this.currencyService.normalizeCurrency(targetCurrency);
+    const converted = await this.currencyService.convertAmount(
+      amount.abs(),
+      fromCurrency,
+      toCurrency,
+    );
+
+    return {
+      currency: fromCurrency,
+      converted_amount: new Prisma.Decimal(converted.amount.toFixed(2)),
+      converted_currency: converted.toCurrency,
+      exchange_rate_used: new Prisma.Decimal(String(converted.rate)),
+    };
+  }
+
+  private async getDisplayConversion(
+    transaction: TransactionMoneyFields,
+    sourceCurrency: string,
+    targetCurrency: string,
+  ) {
+    const normalizedTarget =
+      this.currencyService.normalizeCurrency(targetCurrency);
+
+    if (
+      transaction.converted_amount !== null &&
+      transaction.converted_amount !== undefined &&
+      transaction.converted_currency &&
+      this.currencyService.normalizeCurrency(transaction.converted_currency) ===
+        normalizedTarget
+    ) {
+      return {
+        amount: Number(transaction.converted_amount),
+        toCurrency: normalizedTarget,
+      };
+    }
+
+    return this.currencyService.convertAmount(
+      new Prisma.Decimal(transaction.amount).abs(),
+      transaction.currency ?? sourceCurrency,
+      normalizedTarget,
+    );
+  }
+
+  private async summarizeTransactions(
+    transactionsList: TransactionMoneyFields[],
+    walletCurrencyMap: Map<number, string>,
+    targetCurrency: string,
+  ) {
+    const amounts = await Promise.all(
+      transactionsList.map(async (transaction) => {
+        const signedAmount = new Prisma.Decimal(transaction.amount);
+        const converted = await this.getDisplayConversion(
+          transaction,
+          walletCurrencyMap.get(transaction.wallet_id ?? 0) ?? 'VND',
+          targetCurrency,
+        );
+
+        return {
+          type: this.getTypeFromSignedAmount(signedAmount),
+          amount: converted.amount,
+        };
+      }),
+    );
+
+    return amounts.reduce(
+      (summary, item) => {
+        if (item.type === TransactionType.INCOME) {
+          summary.income += item.amount;
+        } else {
+          summary.expense += item.amount;
+        }
+
+        summary.net = summary.income - summary.expense;
+        return summary;
+      },
+      { income: 0, expense: 0, net: 0 },
+    );
+  }
+
   private async normalizeTransaction(
     transaction: TransactionWithCategory,
     walletCurrency: string,
@@ -207,8 +317,8 @@ export class TransactionsService {
     const signedAmount = new Prisma.Decimal(transaction.amount);
     const type = this.getTypeFromSignedAmount(signedAmount);
     const absoluteAmount = signedAmount.abs();
-    const converted = await this.currencyService.convertAmount(
-      absoluteAmount,
+    const converted = await this.getDisplayConversion(
+      transaction,
       walletCurrency,
       targetCurrency,
     );
@@ -217,7 +327,9 @@ export class TransactionsService {
       ...transaction,
       amount: absoluteAmount,
       type,
-      currency: this.currencyService.normalizeCurrency(walletCurrency),
+      currency: this.currencyService.normalizeCurrency(
+        transaction.currency ?? walletCurrency,
+      ),
       display_amount: converted.amount,
       display_currency: converted.toCurrency,
       category: transaction.category
@@ -225,6 +337,7 @@ export class TransactionsService {
             id: transaction.category.id,
             name: transaction.category.name,
             type: transaction.category.type,
+            cash_flow_group: transaction.category.cash_flow_group,
             icon: transaction.category.icon,
           }
         : null,
@@ -233,6 +346,23 @@ export class TransactionsService {
   }
 
   private async getOwnedWallet(userId: number, walletId: number) {
+    const wallets = await this.prisma.$queryRaw<OwnedWallet[]>`
+      SELECT id, user_id, currency
+      FROM wallets
+      WHERE id = ${walletId} AND user_id = ${userId}
+        AND COALESCE(is_active, 1) = 1
+      LIMIT 1
+    `;
+    const wallet = wallets[0];
+
+    if (!wallet) {
+      throw new NotFoundException('Không tìm thấy ví');
+    }
+
+    return wallet satisfies OwnedWallet;
+  }
+
+  private async getOwnedWalletForRead(userId: number, walletId: number) {
     const wallets = await this.prisma.$queryRaw<OwnedWallet[]>`
       SELECT id, user_id, currency
       FROM wallets
@@ -257,10 +387,13 @@ export class TransactionsService {
     const category = await this.prisma.categories.findFirst({
       where:
         user?.role === 'ADMIN'
-          ? { id: categoryId }
+          ? { id: categoryId, OR: [{ is_active: true }, { is_active: null }] }
           : {
               id: categoryId,
-              OR: [{ is_system: true }, { user_id: userId }],
+              AND: [
+                { OR: [{ is_active: true }, { is_active: null }] },
+                { OR: [{ is_system: true }, { user_id: userId }] },
+              ],
             },
     });
 
@@ -291,7 +424,9 @@ export class TransactionsService {
     const categoryMap = new Map(
       categoriesList.map((category) => [category.id, category]),
     );
-    const transactionIds = transactionsList.map((transaction) => transaction.id);
+    const transactionIds = transactionsList.map(
+      (transaction) => transaction.id,
+    );
     const tagRows =
       transactionIds.length > 0
         ? await this.prisma.$queryRaw<
@@ -344,14 +479,18 @@ export class TransactionsService {
     }
 
     if (!fallbackType) {
-      throw new BadRequestException('Can loai giao dich khi thieu danh muc');
+      throw new BadRequestException(
+        'Vui lòng chọn loại giao dịch khi chưa chọn danh mục.',
+      );
     }
 
     return fallbackType;
   }
 
   async findAll(userId: number, query: TransactionQuery = {}) {
-    const wallets = await this.prisma.$queryRaw<Array<{ id: number; currency: string }>>`
+    const wallets = await this.prisma.$queryRaw<
+      Array<{ id: number; currency: string }>
+    >`
       SELECT id, currency
       FROM wallets
       WHERE user_id = ${userId}
@@ -363,7 +502,7 @@ export class TransactionsService {
     );
 
     if (query.walletId !== undefined) {
-      await this.getOwnedWallet(userId, query.walletId);
+      await this.getOwnedWalletForRead(userId, query.walletId);
     }
 
     const where: Prisma.transactionsWhereInput = {
@@ -382,6 +521,34 @@ export class TransactionsService {
       where.amount = { lt: 0 };
     }
 
+    if (query.cashFlow === 'normal') {
+      const normalCategories = await this.prisma.categories.findMany({
+        where: { cash_flow_group: { not: 'LOAN_DEBT' } },
+        select: { id: true },
+      });
+      const normalCategoryIds = normalCategories.map((category) => category.id);
+
+      where.OR = [
+        { category_id: null },
+        { category_id: { in: normalCategoryIds } },
+      ];
+    }
+
+    if (query.cashFlow === 'loan_debt') {
+      const loanDebtCategories = await this.prisma.categories.findMany({
+        where: { cash_flow_group: 'LOAN_DEBT' },
+        select: { id: true },
+      });
+
+      where.AND = [
+        {
+          category_id: {
+            in: loanDebtCategories.map((category) => category.id),
+          },
+        },
+      ];
+    }
+
     if (query.from || query.to) {
       where.transaction_date = {
         ...(query.from ? { gte: this.parseDateFilter(query.from) } : {}),
@@ -397,7 +564,9 @@ export class TransactionsService {
 
     if (query.tag?.trim()) {
       const normalizedTag = query.tag.trim().replace(/^#+/, '').toLowerCase();
-      const taggedRows = await this.prisma.$queryRaw<Array<{ transaction_id: number }>>`
+      const taggedRows = await this.prisma.$queryRaw<
+        Array<{ transaction_id: number }>
+      >`
         SELECT DISTINCT tt.transaction_id
         FROM transaction_tags tt
         INNER JOIN tags t ON t.id = tt.tag_id
@@ -406,16 +575,22 @@ export class TransactionsService {
       `;
       const transactionIds = taggedRows.map((row) => row.transaction_id);
 
-      where.id = transactionIds.length > 0 ? { in: transactionIds } : { in: [] };
+      where.id =
+        transactionIds.length > 0 ? { in: transactionIds } : { in: [] };
     }
 
-    const shouldPaginate = query.page !== undefined || query.limit !== undefined;
+    const shouldPaginate =
+      query.page !== undefined || query.limit !== undefined;
     const page = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, Math.max(1, query.limit ?? 10));
 
     const transactionsList = await this.prisma.transactions.findMany({
       where,
-      orderBy: { transaction_date: 'desc' },
+      orderBy: [
+        { transaction_date: 'desc' },
+        { created_at: 'desc' },
+        { id: 'desc' },
+      ],
       select: this.transactionSelect,
       ...(shouldPaginate
         ? {
@@ -424,34 +599,31 @@ export class TransactionsService {
           }
         : {}),
     });
-    const data = await this.attachCategories(userId, transactionsList, walletCurrencyMap);
+    const data = await this.attachCategories(
+      userId,
+      transactionsList,
+      walletCurrencyMap,
+    );
 
     if (!shouldPaginate) {
       return data;
     }
 
     const total = await this.prisma.transactions.count({ where });
-    const summaryRows = await this.prisma.transactions.aggregate({
-      where,
-      _sum: { amount: true },
-    });
     const filteredTransactions = await this.prisma.transactions.findMany({
       where,
-      select: { amount: true },
-    });
-    const summary = filteredTransactions.reduce(
-      (totalValue, transaction) => {
-        const amount = Number(transaction.amount);
-
-        if (amount >= 0) {
-          totalValue.income += amount;
-        } else {
-          totalValue.expense += Math.abs(amount);
-        }
-
-        return totalValue;
+      select: {
+        wallet_id: true,
+        amount: true,
+        currency: true,
+        converted_amount: true,
+        converted_currency: true,
       },
-      { income: 0, expense: 0 },
+    });
+    const summary = await this.summarizeTransactions(
+      filteredTransactions,
+      walletCurrencyMap,
+      await this.getActorCurrency(userId),
     );
 
     return {
@@ -463,7 +635,7 @@ export class TransactionsService {
         totalPages: Math.max(1, Math.ceil(total / limit)),
         income: summary.income,
         expense: summary.expense,
-        net: Number(summaryRows._sum.amount ?? 0),
+        net: summary.net,
       },
     };
   }
@@ -472,6 +644,12 @@ export class TransactionsService {
     const wallet = await this.getOwnedWallet(userId, dto.wallet_id);
     const type = await this.resolveType(userId, dto.category_id, dto.type);
     const signedAmount = this.toSignedAmount(dto.amount, type);
+    const targetCurrency = await this.getActorCurrency(userId);
+    const conversionSnapshot = await this.buildConversionSnapshot(
+      signedAmount,
+      wallet.currency,
+      targetCurrency,
+    );
 
     const created = await this.prisma.$transaction(async (tx) => {
       const transaction = await tx.transactions.create({
@@ -479,10 +657,11 @@ export class TransactionsService {
           wallet_id: dto.wallet_id,
           category_id: dto.category_id,
           amount: signedAmount,
+          ...conversionSnapshot,
           note: dto.note,
           receipt_image: dto.receipt_image,
           transaction_date: dto.transaction_date
-            ? new Date(dto.transaction_date)
+            ? this.parseTransactionDate(dto.transaction_date)
             : new Date(),
         },
         select: this.transactionSelect,
@@ -501,6 +680,13 @@ export class TransactionsService {
 
       return transaction;
     });
+
+    if (type === TransactionType.EXPENSE) {
+      await this.notificationsService.createBudgetAlertsForWallet(
+        userId,
+        dto.wallet_id,
+      );
+    }
 
     const walletCurrencyMap = new Map([[wallet.id, wallet.currency]]);
     const [normalized] = await this.attachCategories(
@@ -546,6 +732,18 @@ export class TransactionsService {
       dto.amount !== undefined
         ? this.toSignedAmount(dto.amount, nextType)
         : this.toSignedAmount(currentSignedAmount.abs().toString(), nextType);
+    const shouldRefreshSnapshot =
+      dto.amount !== undefined ||
+      dto.wallet_id !== undefined ||
+      dto.category_id !== undefined ||
+      dto.type !== undefined;
+    const conversionSnapshot = shouldRefreshSnapshot
+      ? await this.buildConversionSnapshot(
+          nextSignedAmount,
+          nextWallet.currency,
+          await this.getActorCurrency(userId),
+        )
+      : null;
 
     const updated = await this.prisma.$transaction(async (tx) => {
       if (current.wallet_id === nextWalletId) {
@@ -583,12 +781,19 @@ export class TransactionsService {
           wallet_id: nextWalletId,
           category_id: dto.category_id ?? undefined,
           amount: nextSignedAmount,
+          currency: conversionSnapshot?.currency,
+          converted_amount: conversionSnapshot?.converted_amount,
+          converted_currency: conversionSnapshot?.converted_currency,
+          exchange_rate_used: conversionSnapshot?.exchange_rate_used,
           note: dto.note ?? undefined,
-          receipt_image: Object.prototype.hasOwnProperty.call(dto, 'receipt_image')
+          receipt_image: Object.prototype.hasOwnProperty.call(
+            dto,
+            'receipt_image',
+          )
             ? (dto.receipt_image ?? null)
             : undefined,
           transaction_date: dto.transaction_date
-            ? new Date(dto.transaction_date)
+            ? this.parseTransactionDate(dto.transaction_date)
             : undefined,
         },
         select: this.transactionSelect,
@@ -598,6 +803,27 @@ export class TransactionsService {
 
       return transaction;
     });
+
+    if (
+      nextType === TransactionType.EXPENSE ||
+      currentType === TransactionType.EXPENSE
+    ) {
+      const walletIdsToCheck = new Set<number>([nextWalletId]);
+
+      if (
+        currentType === TransactionType.EXPENSE &&
+        current.wallet_id !== nextWalletId
+      ) {
+        walletIdsToCheck.add(current.wallet_id);
+      }
+
+      for (const walletId of walletIdsToCheck) {
+        await this.notificationsService.createBudgetAlertsForWallet(
+          userId,
+          walletId,
+        );
+      }
+    }
 
     if (
       Object.prototype.hasOwnProperty.call(dto, 'receipt_image') &&

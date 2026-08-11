@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Post,
   Query,
@@ -29,14 +30,24 @@ export class StatisticsController {
     private reportsService: ReportsService,
   ) {}
 
+  private assertPremiumStatistics(role?: string | null) {
+    if (role !== 'PREMIUM' && role !== 'ADMIN') {
+      throw new ForbiddenException(
+        'Thống kê nâng cao chỉ dành cho tài khoản Premium',
+      );
+    }
+  }
+
   @Get()
   getStatistics(
     @Req() req: AuthenticatedRequest,
     @Query('period') period?: StatisticsPeriod,
   ) {
-    if (period && !['day', 'week', 'month', 'year'].includes(period)) {
+    if (period && !['all', 'day', 'week', 'month', 'year'].includes(period)) {
       throw new BadRequestException('Kỳ thống kê không hợp lệ');
     }
+
+    this.assertPremiumStatistics(req.user.role);
 
     return this.statisticsService.getUserStatistics(
       req.user.userId,
@@ -50,7 +61,7 @@ export class StatisticsController {
     @Query('period') period?: StatisticsPeriod,
     @Query('format') format?: 'excel' | 'pdf',
   ) {
-    if (period && !['day', 'week', 'month', 'year'].includes(period)) {
+    if (period && !['all', 'day', 'week', 'month', 'year'].includes(period)) {
       throw new BadRequestException('Kỳ thống kê không hợp lệ');
     }
 
@@ -71,7 +82,10 @@ export class StatisticsController {
     @Req() req: AuthenticatedRequest,
     @Body() body: { email?: string; period?: StatisticsPeriod },
   ) {
-    if (body.period && !['day', 'week', 'month', 'year'].includes(body.period)) {
+    if (
+      body.period &&
+      !['all', 'day', 'week', 'month', 'year'].includes(body.period)
+    ) {
       throw new BadRequestException('Kỳ thống kê không hợp lệ');
     }
 

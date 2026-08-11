@@ -16,53 +16,32 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
-import { mkdirSync } from 'fs';
-import { diskStorage } from 'multer';
-import { extname, join } from 'path';
+import { join } from 'path';
 import { JwtGuard } from '../auth/jwt.guard';
-import { PrismaService } from '../prisma/prisma.service';
-import { CreateTransactionDto, TransactionType } from './dto/create-transaction.dto';
+import {
+  createImageUploadOptions,
+  deleteUploadedFile,
+  IMAGE_UPLOAD_LIMITS,
+} from '../common/upload/image-upload-options';
+import {
+  CreateTransactionDto,
+  TransactionType,
+} from './dto/create-transaction.dto';
 import { UpdateTransactionDto } from './dto/update-transaction.dto';
 import { TransactionsService } from './transactions.service';
 
 type AuthenticatedRequest = Request & {
   user: {
     userId: number;
-    role?: string | null;
   };
 };
 
 const receiptUploadDir = join(process.cwd(), 'uploads', 'receipts');
 
-function ensureReceiptUploadDir() {
-  mkdirSync(receiptUploadDir, { recursive: true });
-  return receiptUploadDir;
-}
-
-function generateUploadFilename(file: Express.Multer.File) {
-  return `${Date.now()}-${Math.round(Math.random() * 1e9)}${extname(file.originalname)}`;
-}
-
 @Controller('transactions')
 @UseGuards(JwtGuard)
 export class TransactionsController {
-  constructor(
-    private transactionsService: TransactionsService,
-    private prisma: PrismaService,
-  ) {}
-
-  private async logAction(userId: number, role: string | null | undefined, action: string) {
-    if (role !== 'ADMIN') {
-      return;
-    }
-
-    await this.prisma.admin_logs.create({
-      data: {
-        admin_id: userId,
-        action,
-      },
-    });
-  }
+  constructor(private transactionsService: TransactionsService) {}
 
   @Get()
   findAll(
@@ -70,6 +49,7 @@ export class TransactionsController {
     @Query('wallet_id') walletId?: string,
     @Query('category_id') categoryId?: string,
     @Query('type') type?: 'INCOME' | 'EXPENSE',
+    @Query('cash_flow') cashFlow?: 'normal' | 'loan_debt',
     @Query('tag') tag?: string,
     @Query('q') q?: string,
     @Query('note') note?: string,
@@ -82,6 +62,7 @@ export class TransactionsController {
       walletId: walletId ? Number(walletId) : undefined,
       categoryId: categoryId ? Number(categoryId) : undefined,
       type: type ? TransactionType[type] : undefined,
+      cashFlow,
       tag,
       q,
       note,
@@ -102,12 +83,6 @@ export class TransactionsController {
       dto,
     );
 
-    await this.logAction(
-      req.user.userId,
-      req.user.role,
-      `Tạo giao dịch (id: ${transaction.id})`,
-    );
-
     return transaction;
   }
 
@@ -123,8 +98,6 @@ export class TransactionsController {
       dto,
     );
 
-    await this.logAction(req.user.userId, req.user.role, `Cập nhật giao dịch (id: ${id})`);
-
     return transaction;
   }
 
@@ -138,33 +111,18 @@ export class TransactionsController {
       id,
     );
 
-    await this.logAction(req.user.userId, req.user.role, `Xóa giao dịch (id: ${id})`);
-
     return transaction;
   }
 
   @Post(':id/receipt')
   @UseInterceptors(
-    FileInterceptor('file', {
-      storage: diskStorage({
-        destination: (req, file, cb) => {
-          cb(null, ensureReceiptUploadDir());
-        },
-        filename: (req, file, cb) => {
-          cb(null, generateUploadFilename(file));
-        },
+    FileInterceptor(
+      'file',
+      createImageUploadOptions({
+        destination: receiptUploadDir,
+        fileSize: IMAGE_UPLOAD_LIMITS.receipt.fileSize,
       }),
-      fileFilter: (req, file, cb) => {
-        if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
-          return cb(
-            new BadRequestException('Chỉ cho phép tải lên tệp hình ảnh'),
-            false,
-          );
-        }
-
-        cb(null, true);
-      },
-    }),
+    ),
   )
   async uploadReceipt(
     @Req() req: AuthenticatedRequest,
@@ -175,17 +133,18 @@ export class TransactionsController {
       throw new BadRequestException('Vui lòng chọn ảnh hóa đơn');
     }
 
-    const transaction = await this.transactionsService.uploadReceipt(
-      req.user.userId,
-      id,
-      file.filename,
-    );
+    let transaction: Awaited<ReturnType<TransactionsService['uploadReceipt']>>;
 
-    await this.logAction(
-      req.user.userId,
-      req.user.role,
-      `Upload ảnh hóa đơn giao dịch (id: ${id})`,
-    );
+    try {
+      transaction = await this.transactionsService.uploadReceipt(
+        req.user.userId,
+        id,
+        file.filename,
+      );
+    } catch (error) {
+      await deleteUploadedFile(file);
+      throw error;
+    }
 
     return transaction;
   }

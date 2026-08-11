@@ -54,7 +54,10 @@ export class TagsController {
   }
 
   @Delete(':id')
-  remove(@Req() req: AuthenticatedRequest, @Param('id', ParseIntPipe) id: number) {
+  remove(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
     return this.tagsService.remove(req.user.userId, id);
   }
 }

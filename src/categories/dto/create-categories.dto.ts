@@ -12,6 +12,11 @@ export enum CategoryType {
   EXPENSE = 'EXPENSE',
 }
 
+export enum CategoryCashFlowGroup {
+  NORMAL = 'NORMAL',
+  LOAN_DEBT = 'LOAN_DEBT',
+}
+
 export class CreateCategoryDto {
   // Tên danh mục hiển thị cho người dùng.
   @IsString()
@@ -27,4 +32,8 @@ export class CreateCategoryDto {
   @IsOptional()
   @IsBoolean()
   is_system?: boolean;
+
+  @IsOptional()
+  @IsEnum(CategoryCashFlowGroup)
+  cash_flow_group?: CategoryCashFlowGroup;
 }

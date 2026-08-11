@@ -6,7 +6,9 @@
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
+    "prebuild": "prisma generate",
     "build": "nest build",
+    "prisma:generate": "prisma generate",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
@@ -17,12 +19,17 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
+    "check:mojibake:db": "ts-node scripts/check-database-mojibake.ts",
+    "sync:loan-debt-notes": "ts-node scripts/sync-loan-debt-transaction-notes.ts",
+    "sync:budget-notifications": "ts-node scripts/sync-budget-notification-messages.ts",
+    "verify:quality": "npm test -- --runInBand && npm run build && npx eslint \"{src,apps,libs,test}/**/*.ts\" \"scripts/*.ts\" && npm run check:mojibake:db",
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
     "@nestjs/core": "^11.0.1",
     "@nestjs/platform-express": "^11.1.19",
+    "@nestjs/schedule": "^6.0.0",
     "@nestjs/serve-static": "^5.0.5",
     "@prisma/client": "^5.22.0",
     "bcrypt": "^6.0.0",

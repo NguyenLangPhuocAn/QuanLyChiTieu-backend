@@ -12,6 +12,7 @@
   UseInterceptors,
   UploadedFile,
   Query,
+  BadRequestException,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { UsersService } from './users.service';
@@ -26,13 +27,17 @@ import {
   CompletePasswordSetupDto,
   ForgotPasswordDto,
   ResetPasswordDto,
+  VerifyResetOtpDto,
 } from './dto/forgot-password.dto';
 
 import { FileInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
-import { mkdirSync } from 'fs';
-import { extname, join } from 'path';
+import { join } from 'path';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  createImageUploadOptions,
+  deleteUploadedFile,
+  IMAGE_UPLOAD_LIMITS,
+} from '../common/upload/image-upload-options';
 
 type AuthenticatedRequest = Request & {
   // Sau khi qua JwtGuard, thông tin user đã giải mã sẽ được gắn vào req.user.
@@ -43,19 +48,8 @@ type AuthenticatedRequest = Request & {
   };
 };
 
-function generateUploadFilename(file: Express.Multer.File) {
-  // Giữ phần đuôi file gốc và thêm tiền tố unique để tránh trùng tên khi upload.
-  return `${Date.now()}-${Math.round(Math.random() * 1e9)}${extname(file.originalname)}`;
-}
-
 // Avatar của user được tách ra thư mục riêng thay vì dùng chung với các loại file khác.
 const userAvatarUploadDir = join(process.cwd(), 'uploads', 'avatars');
-
-function ensureUserAvatarUploadDir() {
-  // Tạo thư mục đích nếu chưa tồn tại để lần upload đầu tiên không bị lỗi.
-  mkdirSync(userAvatarUploadDir, { recursive: true });
-  return userAvatarUploadDir;
-}
 
 @Controller('users')
 export class UsersController {
@@ -98,6 +92,11 @@ export class UsersController {
   @Post('forgot-password')
   forgotPassword(@Body() dto: ForgotPasswordDto) {
     return this.usersService.forgotPassword(dto.email);
+  }
+
+  @Post('verify-reset-otp')
+  verifyResetOtp(@Body() dto: VerifyResetOtpDto) {
+    return this.usersService.verifyResetOtp(dto.email, dto.otp);
   }
 
   @Post('reset-password')
@@ -168,36 +167,33 @@ export class UsersController {
   @UseGuards(JwtGuard)
   @Put('me/avatar')
   @UseInterceptors(
-    FileInterceptor('file', {
-      storage: diskStorage({
-        // Mỗi lần upload đều resolve lại thư mục đích để chắc chắn folder đã sẵn sàng.
-        destination: (req, file, cb) => {
-          cb(null, ensureUserAvatarUploadDir());
-        },
-        filename: (req, file, cb) => {
-          // Backend chỉ lưu tên file trong DB, còn đường dẫn public sẽ được ghép ở frontend.
-          const uniqueName = generateUploadFilename(file);
-          cb(null, uniqueName);
-        },
+    FileInterceptor(
+      'file',
+      createImageUploadOptions({
+        destination: userAvatarUploadDir,
+        fileSize: IMAGE_UPLOAD_LIMITS.avatar.fileSize,
       }),
-      fileFilter: (req, file, cb) => {
-        // Chỉ nhận các định dạng ảnh được hỗ trợ để tránh upload nhầm file khác.
-        if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
-          return cb(new Error('Chỉ cho phép tải lên tệp hình ảnh'), false);
-        }
-
-        cb(null, true);
-      },
-    }),
+    ),
   )
   async uploadAvatar(
     @Req() req: AuthenticatedRequest,
     @UploadedFile() file: Express.Multer.File,
   ) {
-    // User tự đổi avatar của chính mình nên dùng userId lấy từ token.
-    const user = await this.usersService.updateProfile(req.user.userId, {
-      avatar: file.filename,
-    });
+    if (!file) {
+      throw new BadRequestException('Vui lòng chọn tệp');
+    }
+
+    let user: Awaited<ReturnType<UsersService['updateProfile']>>;
+
+    try {
+      // User tự đổi avatar của chính mình nên dùng userId lấy từ token.
+      user = await this.usersService.updateProfile(req.user.userId, {
+        avatar: file.filename,
+      });
+    } catch (error) {
+      await deleteUploadedFile(file);
+      throw error;
+    }
 
     await this.prisma.admin_logs.create({
       data: {
@@ -231,35 +227,32 @@ export class UsersController {
   @UseGuards(JwtGuard, AdminGuard)
   @Put('detail/:id/avatar')
   @UseInterceptors(
-    FileInterceptor('file', {
-      storage: diskStorage({
-        // Admin upload avatar cho user khác nhưng vẫn dùng cùng thư mục avatar riêng.
-        destination: (req, file, cb) => {
-          cb(null, ensureUserAvatarUploadDir());
-        },
-        filename: (req, file, cb) => {
-          // Chuẩn hóa cách đặt tên để luồng admin và self-service dùng cùng format file.
-          const uniqueName = generateUploadFilename(file);
-          cb(null, uniqueName);
-        },
+    FileInterceptor(
+      'file',
+      createImageUploadOptions({
+        destination: userAvatarUploadDir,
+        fileSize: IMAGE_UPLOAD_LIMITS.avatar.fileSize,
       }),
-      fileFilter: (req, file, cb) => {
-        // Giữ cùng rule validate ảnh như endpoint me/avatar để hành vi đồng nhất.
-        if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
-          return cb(new Error('Chỉ cho phép tải lên tệp hình ảnh'), false);
-        }
-
-        cb(null, true);
-      },
-    }),
+    ),
   )
   async uploadAvatarByAdmin(
     @Req() req: AuthenticatedRequest,
     @Param('id', ParseIntPipe) id: number,
     @UploadedFile() file: Express.Multer.File,
   ) {
-    // Admin chỉ định user theo param id và cập nhật trường avatar bằng tên file mới.
-    const user = await this.usersService.updateAvatar(id, file.filename, req.user);
+    if (!file) {
+      throw new BadRequestException('Vui lòng chọn tệp');
+    }
+
+    let user: Awaited<ReturnType<UsersService['updateAvatar']>>;
+
+    try {
+      // Admin chỉ định user theo param id và cập nhật trường avatar bằng tên file mới.
+      user = await this.usersService.updateAvatar(id, file.filename, req.user);
+    } catch (error) {
+      await deleteUploadedFile(file);
+      throw error;
+    }
 
     await this.logAdminAction(
       req,

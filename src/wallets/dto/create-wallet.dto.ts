@@ -1,4 +1,4 @@
-import {
+﻿import {
   IsIn,
   IsNotEmpty,
   IsOptional,
@@ -23,13 +23,6 @@ export class CreateWalletDto {
       'Số dư ban đầu phải là số không âm và có tối đa 2 chữ số thập phân',
   })
   balance?: string;
-
-  @IsOptional()
-  @Matches(/^\d+(\.\d{1,2})?$/, {
-    message:
-      'Hạn mức chi tiêu phải là số không âm và có tối đa 2 chữ số thập phân',
-  })
-  budget_limit?: string;
 
   @IsOptional()
   @IsString({ message: 'Tiền tệ phải là chuỗi ký tự' })

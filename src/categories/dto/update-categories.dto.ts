@@ -1,5 +1,5 @@
 import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
-import { CategoryType } from './create-categories.dto';
+import { CategoryCashFlowGroup, CategoryType } from './create-categories.dto';
 
 export class UpdateCategoryDto {
   @IsOptional()
@@ -10,4 +10,8 @@ export class UpdateCategoryDto {
   @IsOptional()
   @IsEnum(CategoryType)
   type?: CategoryType;
+
+  @IsOptional()
+  @IsEnum(CategoryCashFlowGroup)
+  cash_flow_group?: CategoryCashFlowGroup;
 }

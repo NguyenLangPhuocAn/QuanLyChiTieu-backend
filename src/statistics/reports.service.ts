@@ -8,18 +8,59 @@ import { Prisma } from '@prisma/client';
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { existsSync } from 'fs';
-import * as nodemailer from 'nodemailer';
+import nodemailerModule from 'nodemailer';
+
+const nodemailer = nodemailerModule as unknown as {
+  createTransport(options: {
+    host: string;
+    port: number;
+    secure: boolean;
+    auth?: { user: string; pass: string };
+  }): {
+    sendMail(options: {
+      from: string;
+      to: string;
+      subject: string;
+      text: string;
+      html?: string;
+      attachments: Array<{
+        filename: string;
+        content?: Buffer;
+        path?: string;
+        contentType?: string;
+        cid?: string;
+      }>;
+    }): Promise<unknown>;
+  };
+};
 import { CurrencyService } from '../currency/currency.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { isNormalCashFlow } from '../common/finance/cash-flow-classification';
+import {
+  buildEmailInlineAttachments,
+  buildReportEmailHtml,
+} from '../common/mail/html-email';
 import type { StatisticsPeriod } from './statistics.service';
 
 type ReportFormat = 'excel' | 'pdf';
+
+const periodLabels: Record<StatisticsPeriod, string> = {
+  all: 'tất cả',
+  day: 'ngày',
+  week: 'tuần',
+  month: 'tháng',
+  year: 'năm',
+};
 
 type ReportTransaction = {
   id: number;
   wallet_id: number | null;
   category_id: number | null;
   amount: Prisma.Decimal;
+  currency?: string | null;
+  converted_amount?: Prisma.Decimal | null;
+  converted_currency?: string | null;
+  exchange_rate_used?: Prisma.Decimal | null;
   note: string | null;
   transaction_date: Date;
 };
@@ -35,6 +76,14 @@ type ReportRow = {
   currency: string;
   note: string;
   tags: string[];
+};
+
+type ReportCategoryMeta = {
+  id: number;
+  name: string;
+  type: string;
+  icon?: string | null;
+  cash_flow_group?: string | null;
 };
 
 const formatDate = (date: Date) =>
@@ -59,13 +108,22 @@ export class ReportsService {
 
   private getPeriodRange(period: StatisticsPeriod) {
     const now = new Date();
+    const tomorrow = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() + 1,
+    );
+
+    if (period === 'all') {
+      return { start: new Date(1970, 0, 1), end: tomorrow };
+    }
 
     if (period === 'day') {
       const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       start.setHours(0, 0, 0, 0);
       const end = new Date(start);
       end.setDate(end.getDate() + 1);
-      return { start, end };
+      return { start, end: end > tomorrow ? tomorrow : end };
     }
 
     if (period === 'week') {
@@ -75,25 +133,58 @@ export class ReportsService {
       start.setHours(0, 0, 0, 0);
       const end = new Date(start);
       end.setDate(end.getDate() + 7);
-      return { start, end };
+      return { start, end: end > tomorrow ? tomorrow : end };
     }
 
     if (period === 'year') {
+      const end = new Date(now.getFullYear() + 1, 0, 1);
       return {
         start: new Date(now.getFullYear(), 0, 1),
-        end: new Date(now.getFullYear() + 1, 0, 1),
+        end: end > tomorrow ? tomorrow : end,
       };
     }
 
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
     return {
       start: new Date(now.getFullYear(), now.getMonth(), 1),
-      end: new Date(now.getFullYear(), now.getMonth() + 1, 1),
+      end: end > tomorrow ? tomorrow : end,
     };
   }
 
-  private async buildReportData(userId: number, role: string | null, period: StatisticsPeriod) {
+  private async convertTransactionAmount(
+    transaction: ReportTransaction,
+    walletCurrency: string,
+    targetCurrency: string,
+  ) {
+    const target = this.currencyService.normalizeCurrency(targetCurrency);
+
+    if (
+      transaction.converted_amount &&
+      transaction.converted_currency &&
+      this.currencyService.normalizeCurrency(transaction.converted_currency) ===
+        target
+    ) {
+      return Number(transaction.converted_amount);
+    }
+
+    const converted = await this.currencyService.convertAmount(
+      new Prisma.Decimal(transaction.amount).abs(),
+      transaction.currency ?? walletCurrency,
+      target,
+    );
+
+    return converted.amount;
+  }
+
+  private async buildReportData(
+    userId: number,
+    role: string | null,
+    period: StatisticsPeriod,
+  ) {
     if (role !== 'PREMIUM' && role !== 'ADMIN') {
-      throw new ForbiddenException('Tính năng xuất báo cáo chỉ dành cho Premium');
+      throw new ForbiddenException(
+        'Tính năng xuất báo cáo chỉ dành cho Premium',
+      );
     }
 
     const user = await this.prisma.users.findUnique({
@@ -105,11 +196,21 @@ export class ReportsService {
       throw new NotFoundException('Không tìm thấy người dùng');
     }
 
-    const displayCurrency = this.currencyService.normalizeCurrency(user.currency_default);
+    const displayCurrency = this.currencyService.normalizeCurrency(
+      user.currency_default,
+    );
     const range = this.getPeriodRange(period);
     const wallets = await this.prisma.wallets.findMany({
-      where: { user_id: userId },
-      select: { id: true, name: true, wallet_type: true, currency: true, balance: true },
+      where: {
+        user_id: userId,
+      },
+      select: {
+        id: true,
+        name: true,
+        wallet_type: true,
+        currency: true,
+        balance: true,
+      },
       orderBy: { id: 'asc' },
     });
     const walletIds = wallets.map((wallet) => wallet.id);
@@ -125,6 +226,10 @@ export class ReportsService {
             wallet_id: true,
             category_id: true,
             amount: true,
+            currency: true,
+            converted_amount: true,
+            converted_currency: true,
+            exchange_rate_used: true,
             note: true,
             transaction_date: true,
           },
@@ -137,39 +242,65 @@ export class ReportsService {
     const categories = categoryIds.length
       ? await this.prisma.categories.findMany({
           where: { id: { in: categoryIds } },
-          select: { id: true, name: true, type: true },
+          select: {
+            id: true,
+            name: true,
+            type: true,
+            icon: true,
+            cash_flow_group: true,
+          },
         })
       : [];
-    const categoryMap = new Map(categories.map((category) => [category.id, category]));
-    const tagRows = transactions.length
-      ? await this.prisma.$queryRaw<Array<{ transaction_id: number; name: string }>>`
+    const categoryMap = new Map(
+      categories.map((category) => [
+        category.id,
+        category as ReportCategoryMeta,
+      ]),
+    );
+    const reportTransactions = transactions.filter((transaction) => {
+      const category = transaction.category_id
+        ? categoryMap.get(transaction.category_id)
+        : null;
+
+      return isNormalCashFlow(category);
+    });
+    const tagRows = reportTransactions.length
+      ? await this.prisma.$queryRaw<
+          Array<{ transaction_id: number; name: string }>
+        >`
           SELECT tt.transaction_id, t.name
           FROM transaction_tags tt
           INNER JOIN tags t ON t.id = tt.tag_id
-          WHERE tt.transaction_id IN (${Prisma.join(transactions.map((item) => item.id))})
+          WHERE tt.transaction_id IN (${Prisma.join(reportTransactions.map((item) => item.id))})
           ORDER BY t.name ASC
         `
       : [];
     const tagMap = new Map<number, string[]>();
 
     tagRows.forEach((row) => {
-      tagMap.set(row.transaction_id, [...(tagMap.get(row.transaction_id) ?? []), row.name]);
+      tagMap.set(row.transaction_id, [
+        ...(tagMap.get(row.transaction_id) ?? []),
+        row.name,
+      ]);
     });
 
     let income = 0;
     let expense = 0;
     const rows: ReportRow[] = [];
 
-    for (const transaction of transactions) {
-      const wallet = transaction.wallet_id ? walletMap.get(transaction.wallet_id) : null;
-      const category = transaction.category_id ? categoryMap.get(transaction.category_id) : null;
+    for (const transaction of reportTransactions) {
+      const wallet = transaction.wallet_id
+        ? walletMap.get(transaction.wallet_id)
+        : null;
+      const category = transaction.category_id
+        ? categoryMap.get(transaction.category_id)
+        : null;
       const signedAmount = new Prisma.Decimal(transaction.amount);
-      const converted = await this.currencyService.convertAmount(
-        signedAmount.abs(),
+      const amount = await this.convertTransactionAmount(
+        transaction,
         wallet?.currency ?? 'VND',
         displayCurrency,
       );
-      const amount = converted.amount;
 
       if (signedAmount.greaterThanOrEqualTo(0)) {
         income += amount;
@@ -200,14 +331,20 @@ export class ReportsService {
         income,
         expense,
         net: income - expense,
-        transactionCount: transactions.length,
+        transactionCount: reportTransactions.length,
       },
       wallets,
       rows,
+      periodLabel: periodLabels[period],
     };
   }
 
-  async exportReport(userId: number, role: string | null, period: StatisticsPeriod, format: ReportFormat) {
+  async exportReport(
+    userId: number,
+    role: string | null,
+    period: StatisticsPeriod,
+    format: ReportFormat,
+  ) {
     const data = await this.buildReportData(userId, role, period);
 
     if (format === 'excel') {
@@ -217,7 +354,12 @@ export class ReportsService {
     return this.exportPdf(data);
   }
 
-  async sendExcelReport(userId: number, role: string | null, period: StatisticsPeriod, email: string) {
+  async sendExcelReport(
+    userId: number,
+    role: string | null,
+    period: StatisticsPeriod,
+    email: string,
+  ) {
     const recipient = email.trim().toLowerCase();
 
     if (!isEmail(recipient)) {
@@ -226,9 +368,19 @@ export class ReportsService {
 
     const data = await this.buildReportData(userId, role, period);
     const report = await this.exportExcel(data);
+    const rangeLabel = `${formatDate(data.range.start)} - ${formatDate(new Date(data.range.end.getTime() - 1))}`;
+    const html = buildReportEmailHtml({
+      recipientName: data.user.full_name || data.user.email,
+      periodLabel: periodLabels[period],
+      rangeLabel,
+      income: `${data.summary.income.toLocaleString('vi-VN')} ${data.displayCurrency}`,
+      expense: `${data.summary.expense.toLocaleString('vi-VN')} ${data.displayCurrency}`,
+      net: `${data.summary.net.toLocaleString('vi-VN')} ${data.displayCurrency}`,
+      transactionCount: data.summary.transactionCount,
+    });
     const mail = await this.sendMail(
       recipient,
-      `Báo cáo chi tiêu ${period}`,
+      `Báo cáo chi tiêu ${periodLabels[period]}`,
       [
         `Xin chào ${data.user.full_name || data.user.email},`,
         '',
@@ -242,6 +394,7 @@ export class ReportsService {
         content: Buffer.from(report.base64, 'base64'),
         contentType: report.mimeType,
       },
+      { html },
     );
 
     return {
@@ -258,6 +411,7 @@ export class ReportsService {
     subject: string,
     text: string,
     attachment: { filename: string; content: Buffer; contentType: string },
+    options: { html?: string } = {},
   ) {
     const host = process.env.SMTP_HOST;
     const user = process.env.SMTP_USER;
@@ -281,13 +435,16 @@ export class ReportsService {
       to,
       subject,
       text,
-      attachments: [attachment],
+      html: options.html,
+      attachments: [attachment, ...buildEmailInlineAttachments()],
     });
 
     return { delivered: true, devOnly: false };
   }
 
-  private async exportExcel(data: Awaited<ReturnType<ReportsService['buildReportData']>>) {
+  private async exportExcel(
+    data: Awaited<ReturnType<ReportsService['buildReportData']>>,
+  ) {
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'QuanLyChiTieu';
     workbook.created = new Date();
@@ -300,9 +457,12 @@ export class ReportsService {
     summarySheet.addRows([
       { label: 'Người dùng', value: data.user.full_name || data.user.email },
       { label: 'Email', value: data.user.email },
-      { label: 'Kỳ báo cáo', value: data.period },
+      { label: 'Kỳ báo cáo', value: data.periodLabel },
       { label: 'Từ ngày', value: formatDate(data.range.start) },
-      { label: 'Đến ngày', value: formatDate(new Date(data.range.end.getTime() - 1)) },
+      {
+        label: 'Đến ngày',
+        value: formatDate(new Date(data.range.end.getTime() - 1)),
+      },
       { label: 'Tiền tệ', value: data.displayCurrency },
       { label: 'Tổng thu', value: data.summary.income },
       { label: 'Tổng chi', value: data.summary.expense },
@@ -361,13 +521,16 @@ export class ReportsService {
     const fileDate = formatFileDate(new Date());
 
     return {
-      filename: `bao-cao-chi-tieu-${data.period}-${fileDate}.xlsx`,
-      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      filename: `bao-cao-chi-tieu-${data.periodLabel}-${fileDate}.xlsx`,
+      mimeType:
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       base64: Buffer.from(buffer).toString('base64'),
     };
   }
 
-  private async exportPdf(data: Awaited<ReturnType<ReportsService['buildReportData']>>) {
+  private async exportPdf(
+    data: Awaited<ReturnType<ReportsService['buildReportData']>>,
+  ) {
     const doc = new PDFDocument({ margin: 40, size: 'A4' });
     const chunks: Buffer[] = [];
     const regularFont = 'C:/Windows/Fonts/arial.ttf';
@@ -402,10 +565,12 @@ export class ReportsService {
     doc.fontSize(18).text('Báo cáo chi tiêu', { align: 'center' });
     useRegular();
     doc.moveDown(0.8);
-    doc.fontSize(10).text(`Người dùng: ${data.user.full_name || data.user.email}`);
+    doc
+      .fontSize(10)
+      .text(`Người dùng: ${data.user.full_name || data.user.email}`);
     doc.text(`Email: ${data.user.email}`);
     doc.text(
-      `Kỳ: ${data.period} | ${formatDate(data.range.start)} - ${formatDate(
+      `Kỳ: ${data.periodLabel} | ${formatDate(data.range.start)} - ${formatDate(
         new Date(data.range.end.getTime() - 1),
       )}`,
     );
@@ -415,9 +580,17 @@ export class ReportsService {
     useBold();
     doc.fontSize(12).text('Tổng quan');
     useRegular();
-    doc.fontSize(10).text(`Tổng thu: ${data.summary.income.toLocaleString('vi-VN')} ${data.displayCurrency}`);
-    doc.text(`Tổng chi: ${data.summary.expense.toLocaleString('vi-VN')} ${data.displayCurrency}`);
-    doc.text(`Số dư kỳ: ${data.summary.net.toLocaleString('vi-VN')} ${data.displayCurrency}`);
+    doc
+      .fontSize(10)
+      .text(
+        `Tổng thu: ${data.summary.income.toLocaleString('vi-VN')} ${data.displayCurrency}`,
+      );
+    doc.text(
+      `Tổng chi: ${data.summary.expense.toLocaleString('vi-VN')} ${data.displayCurrency}`,
+    );
+    doc.text(
+      `Số dư kỳ: ${data.summary.net.toLocaleString('vi-VN')} ${data.displayCurrency}`,
+    );
     doc.text(`Số giao dịch: ${data.summary.transactionCount}`);
     doc.moveDown();
 
@@ -438,7 +611,9 @@ export class ReportsService {
         doc
           .fontSize(8)
           .fillColor('#666666')
-          .text(`${row.note}${row.tags.length ? ` | ${row.tags.map((tag) => `#${tag}`).join(' ')}` : ''}`);
+          .text(
+            `${row.note}${row.tags.length ? ` | ${row.tags.map((tag) => `#${tag}`).join(' ')}` : ''}`,
+          );
         doc.fillColor('#000000');
       }
     });
@@ -448,7 +623,7 @@ export class ReportsService {
     const fileDate = formatFileDate(new Date());
 
     return {
-      filename: `bao-cao-chi-tieu-${data.period}-${fileDate}.pdf`,
+      filename: `bao-cao-chi-tieu-${data.periodLabel}-${fileDate}.pdf`,
       mimeType: 'application/pdf',
       base64: buffer.toString('base64'),
     };

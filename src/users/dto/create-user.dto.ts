@@ -1,4 +1,11 @@
-import { IsEmail, IsIn, IsOptional, IsString, MinLength, Matches } from 'class-validator';
+import {
+  IsEmail,
+  IsIn,
+  IsOptional,
+  IsString,
+  MinLength,
+  Matches,
+} from 'class-validator';
 import { SUPPORTED_CURRENCIES } from '../../currency/currency.constants';
 
 export class CreateUserDto {

@@ -17,7 +17,8 @@ type WalletRow = {
   wallet_type: WalletType;
   currency: string;
   balance: Prisma.Decimal | null;
-  budget_limit: Prisma.Decimal | null;
+  is_active: boolean | number | null;
+  deleted_at: Date | null;
   created_at: Date | null;
 };
 
@@ -78,7 +79,7 @@ export class WalletsService {
 
   private async findWalletById(id: number) {
     const rows = await this.prisma.$queryRaw<WalletRow[]>`
-      SELECT id, user_id, name, wallet_type, currency, balance, budget_limit, created_at
+      SELECT id, user_id, name, wallet_type, currency, balance, is_active, deleted_at, created_at
       FROM wallets
       WHERE id = ${id}
       LIMIT 1
@@ -96,10 +97,7 @@ export class WalletsService {
       where: {
         type,
         is_system: true,
-        OR: [
-          { name: BALANCE_ADJUSTMENT_CATEGORY_NAME },
-          { icon },
-        ],
+        OR: [{ name: BALANCE_ADJUSTMENT_CATEGORY_NAME }, { icon }],
       },
       select: { id: true },
     });
@@ -126,36 +124,49 @@ export class WalletsService {
     wallet: WalletRow,
     targetCurrency?: string | null,
   ) {
-    const displayCurrency = this.currencyService.normalizeCurrency(targetCurrency);
+    const displayCurrency =
+      this.currencyService.normalizeCurrency(targetCurrency);
     const convertedBalance = await this.currencyService.convertAmount(
       wallet.balance,
       wallet.currency,
       displayCurrency,
     );
-    const convertedBudget =
-      wallet.budget_limit !== null
-        ? await this.currencyService.convertAmount(
-            wallet.budget_limit,
-            wallet.currency,
-            displayCurrency,
-          )
-        : null;
-
     return {
       ...wallet,
       currency: this.currencyService.normalizeCurrency(wallet.currency),
       display_currency: displayCurrency,
       display_balance: convertedBalance.amount,
-      display_budget_limit: convertedBudget?.amount ?? null,
+    };
+  }
+
+  private async buildBalanceAdjustmentSnapshot(
+    amount: Prisma.Decimal,
+    sourceCurrency: string,
+    targetCurrency?: string | null,
+  ) {
+    const fromCurrency = this.currencyService.normalizeCurrency(sourceCurrency);
+    const toCurrency = this.currencyService.normalizeCurrency(targetCurrency);
+    const converted = await this.currencyService.convertAmount(
+      amount.abs(),
+      fromCurrency,
+      toCurrency,
+    );
+
+    return {
+      currency: fromCurrency,
+      converted_amount: new Prisma.Decimal(converted.amount.toFixed(2)),
+      converted_currency: converted.toCurrency,
+      exchange_rate_used: new Prisma.Decimal(String(converted.rate)),
     };
   }
 
   async findAll(userId: number) {
     const actor = await this.getActor(userId);
     const wallets = await this.prisma.$queryRaw<WalletRow[]>`
-      SELECT id, user_id, name, wallet_type, currency, balance, budget_limit, created_at
+      SELECT id, user_id, name, wallet_type, currency, balance, is_active, deleted_at, created_at
       FROM wallets
       WHERE user_id = ${userId}
+        AND COALESCE(is_active, 1) = 1
       ORDER BY id DESC
     `;
 
@@ -171,6 +182,10 @@ export class WalletsService {
     const wallet = await this.findWalletById(id);
 
     if (!wallet) {
+      throw new NotFoundException('Không tìm thấy ví');
+    }
+
+    if (wallet.is_active === false || wallet.is_active === 0) {
       throw new NotFoundException('Không tìm thấy ví');
     }
 
@@ -193,6 +208,7 @@ export class WalletsService {
       where: {
         user_id: userId,
         name,
+        OR: [{ is_active: true }, { is_active: null }],
       },
     });
 
@@ -201,7 +217,10 @@ export class WalletsService {
     }
 
     const currentWalletCount = await this.prisma.wallets.count({
-      where: { user_id: userId },
+      where: {
+        user_id: userId,
+        OR: [{ is_active: true }, { is_active: null }],
+      },
     });
 
     if (actor.role === 'BASIC' && currentWalletCount >= 2) {
@@ -209,7 +228,6 @@ export class WalletsService {
     }
 
     const balance = this.toDecimal(dto.balance, '0') ?? new Prisma.Decimal(0);
-    const budgetLimit = this.toDecimal(dto.budget_limit) ?? null;
     const currency = this.currencyService.normalizeCurrency(
       dto.currency ?? actor.currency_default,
     );
@@ -217,8 +235,8 @@ export class WalletsService {
 
     const walletId = await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`
-        INSERT INTO wallets (user_id, name, wallet_type, currency, balance, budget_limit, created_at)
-        VALUES (${userId}, ${name}, ${walletType}, ${currency}, ${balance}, ${budgetLimit}, NOW())
+        INSERT INTO wallets (user_id, name, wallet_type, currency, balance, created_at)
+        VALUES (${userId}, ${name}, ${walletType}, ${currency}, ${balance}, NOW())
       `;
 
       const rows = await tx.$queryRaw<Array<{ id: number }>>`
@@ -248,6 +266,10 @@ export class WalletsService {
       throw new NotFoundException('Không tìm thấy ví');
     }
 
+    if (wallet.is_active === false || wallet.is_active === 0) {
+      throw new NotFoundException('Không tìm thấy ví');
+    }
+
     if (!this.canAccessWallet(wallet.user_id, userId)) {
       throw new BadRequestException('Bạn không có quyền sửa ví này');
     }
@@ -265,7 +287,6 @@ export class WalletsService {
     const hasUpdateData =
       nextName !== undefined ||
       nextWalletType !== undefined ||
-      dto.budget_limit !== undefined ||
       nextCurrency !== undefined ||
       nextBalance !== undefined;
 
@@ -278,6 +299,7 @@ export class WalletsService {
         where: {
           user_id: wallet.user_id,
           name: nextName,
+          OR: [{ is_active: true }, { is_active: null }],
           NOT: { id },
         },
       });
@@ -299,17 +321,15 @@ export class WalletsService {
       }
     }
 
+    const actor = await this.getActor(userId);
+
     await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`
         UPDATE wallets
         SET
           name = COALESCE(${nextName ?? null}, name),
           wallet_type = COALESCE(${nextWalletType ?? null}, wallet_type),
-          currency = COALESCE(${nextCurrency ?? null}, currency),
-          budget_limit = CASE
-            WHEN ${dto.budget_limit !== undefined} THEN ${this.toDecimal(dto.budget_limit) ?? null}
-            ELSE budget_limit
-          END
+          currency = COALESCE(${nextCurrency ?? null}, currency)
         WHERE id = ${id}
       `;
 
@@ -319,13 +339,22 @@ export class WalletsService {
 
         if (!adjustmentAmount.isZero()) {
           const type = adjustmentAmount.greaterThan(0) ? 'INCOME' : 'EXPENSE';
-          const categoryId = await this.getBalanceAdjustmentCategoryId(tx, type);
+          const categoryId = await this.getBalanceAdjustmentCategoryId(
+            tx,
+            type,
+          );
+          const conversionSnapshot = await this.buildBalanceAdjustmentSnapshot(
+            adjustmentAmount,
+            wallet.currency,
+            actor.currency_default,
+          );
 
           await tx.transactions.create({
             data: {
               wallet_id: id,
               category_id: categoryId,
               amount: adjustmentAmount,
+              ...conversionSnapshot,
               note: BALANCE_ADJUSTMENT_NOTE,
               transaction_date: new Date(),
             },
@@ -343,7 +372,6 @@ export class WalletsService {
       }
     });
 
-    const actor = await this.getActor(userId);
     const updated = await this.findWalletById(id);
 
     if (!updated) {
@@ -360,15 +388,26 @@ export class WalletsService {
       throw new NotFoundException('Không tìm thấy ví');
     }
 
+    if (wallet.is_active === false || wallet.is_active === 0) {
+      throw new NotFoundException('Không tìm thấy ví');
+    }
+
     if (!this.canAccessWallet(wallet.user_id, userId)) {
       throw new BadRequestException('Bạn không có quyền xóa ví này');
     }
 
-    await this.prisma.$executeRaw`
-      DELETE FROM wallets
-      WHERE id = ${id}
-    `;
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`
+        UPDATE wallets
+        SET is_active = 0, deleted_at = NOW()
+        WHERE id = ${id}
+      `;
+    });
 
-    return wallet;
+    return {
+      ...wallet,
+      is_active: false,
+      deleted_at: new Date(),
+    };
   }
 }

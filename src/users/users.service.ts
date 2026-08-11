@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call */
 import {
   Injectable,
   NotFoundException,
@@ -8,7 +9,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import * as bcrypt from 'bcrypt';
 import * as jwt from 'jsonwebtoken';
-import { randomBytes, randomUUID } from 'crypto';
+import { randomBytes, randomInt, randomUUID } from 'crypto';
 import * as nodemailer from 'nodemailer';
 import { CreateUserDto } from './dto/create-user.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -18,6 +19,12 @@ import {
   CompletePasswordSetupDto,
   ResetPasswordDto,
 } from './dto/forgot-password.dto';
+import {
+  buildEmailInlineAttachments,
+  buildNewAccountEmailHtml,
+  buildResetOtpEmailHtml,
+  buildTemporaryPasswordEmailHtml,
+} from '../common/mail/html-email';
 
 type UserBase = {
   id: number;
@@ -51,7 +58,9 @@ const SUPER_ADMIN_EMAIL = 'admin@gmail.com';
 const ACCESS_TOKEN_EXPIRES_IN = '10m';
 const ACCESS_TOKEN_TTL_SECONDS = 10 * 60;
 const REFRESH_TOKEN_TTL_DAYS = 30;
-const RESET_TOKEN_TTL_MINUTES = 30;
+const OTP_TTL_MINUTES = 10;
+const RESET_TOKEN_TTL_MINUTES = 10;
+const RESET_OTP_MAX_ATTEMPTS = 5;
 
 type UserWithWalletCount = UserBase & {
   wallet_count: number;
@@ -67,7 +76,10 @@ export class UsersService {
   // Lấy số lượng ví của một user để hiển thị trong trang quản lý người dùng.
   private async getWalletCount(userId: number) {
     return this.prisma.wallets.count({
-      where: { user_id: userId },
+      where: {
+        user_id: userId,
+        OR: [{ is_active: true }, { is_active: null }],
+      },
     });
   }
 
@@ -110,7 +122,9 @@ export class UsersService {
     const nextRole = dto.role;
 
     if (isSelf) {
-      throw new ForbiddenException('Admin hãy cập nhật hồ sơ của mình ở mục Hồ sơ admin');
+      throw new ForbiddenException(
+        'Admin hãy cập nhật hồ sơ của mình ở mục Hồ sơ admin',
+      );
     }
 
     if (targetIsSuperAdmin && deleting) {
@@ -126,15 +140,23 @@ export class UsersService {
     }
 
     if (targetIsSuperAdmin && !actorIsSuperAdmin) {
-      throw new ForbiddenException('Chỉ admin tổng mới được cập nhật tài khoản admin tổng');
+      throw new ForbiddenException(
+        'Chỉ admin tổng mới được cập nhật tài khoản admin tổng',
+      );
     }
 
     if (dto.email !== undefined && dto.email !== target.email) {
       throw new ForbiddenException('Email chỉ được xem, không được thay đổi');
     }
 
-    if (!actorIsSuperAdmin && nextRole !== undefined && nextRole !== target.role) {
-      throw new ForbiddenException('Admin thường không được thay đổi role người dùng');
+    if (
+      !actorIsSuperAdmin &&
+      nextRole !== undefined &&
+      nextRole !== target.role
+    ) {
+      throw new ForbiddenException(
+        'Admin thường không được thay đổi role người dùng',
+      );
     }
   }
 
@@ -147,7 +169,9 @@ export class UsersService {
     }
 
     if (actor.userId === target.id) {
-      throw new ForbiddenException('Admin hãy xem hồ sơ của mình ở mục Hồ sơ admin');
+      throw new ForbiddenException(
+        'Admin hãy xem hồ sơ của mình ở mục Hồ sơ admin',
+      );
     }
 
     if (!this.isSuperAdmin(actor) && target.role === 'ADMIN') {
@@ -246,11 +270,42 @@ export class UsersService {
     `;
   }
 
+  private isInactiveStatus(value: boolean | number | null | undefined) {
+    return value === false || value === 0;
+  }
+
+  private canSelfRestore(user?: { role?: string | null }) {
+    return user?.role !== 'ADMIN';
+  }
+
+  private async restoreAccount(userId: number) {
+    await this.prisma.$executeRaw`
+      UPDATE users
+      SET is_active = 1,
+          deleted_at = NULL
+      WHERE id = ${userId}
+    `;
+
+    const user = await this.prisma.users.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      throw new NotFoundException('Người dùng không tồn tại');
+    }
+
+    return user;
+  }
+
+  private generateResetOtp() {
+    return String(randomInt(0, 1_000_000)).padStart(6, '0');
+  }
+
   private generateTemporaryPassword() {
-    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+    const alphabet =
+      'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
     const special = '@$!%*?&';
-    const pick = (source: string) =>
-      source[randomBytes(1)[0] % source.length];
+    const pick = (source: string) => source[randomBytes(1)[0] % source.length];
     const chars = [
       pick('ABCDEFGHJKLMNPQRSTUVWXYZ'),
       pick('abcdefghijkmnopqrstuvwxyz'),
@@ -262,14 +317,28 @@ export class UsersService {
     return chars.sort(() => randomBytes(1)[0] - 128).join('');
   }
 
-  private async sendMail(to: string, subject: string, text: string) {
+  private getResetExpiry(minutes: number) {
+    const expiresAt = new Date();
+    expiresAt.setMinutes(expiresAt.getMinutes() + minutes);
+    return expiresAt;
+  }
+
+  private async sendMail(
+    to: string,
+    subject: string,
+    text: string,
+    options: { sensitive?: boolean; html?: string } = {},
+  ) {
     const host = process.env.SMTP_HOST;
     const user = process.env.SMTP_USER;
     const pass = process.env.SMTP_PASS;
     const from = process.env.SMTP_FROM ?? user;
 
     if (!host || !from) {
-      console.log(`[MAIL:DEV] To: ${to}\nSubject: ${subject}\n${text}`);
+      const body = options.sensitive
+        ? '[Nội dung nhạy cảm đã được ẩn trong log dev]'
+        : text;
+      console.log(`[MAIL:DEV] To: ${to}\nSubject: ${subject}\n${body}`);
       return { delivered: false, devOnly: true };
     }
 
@@ -280,7 +349,14 @@ export class UsersService {
       auth: user && pass ? { user, pass } : undefined,
     });
 
-    await transporter.sendMail({ from, to, subject, text });
+    await transporter.sendMail({
+      from,
+      to,
+      subject,
+      text,
+      html: options.html,
+      attachments: options.html ? buildEmailInlineAttachments() : undefined,
+    });
     return { delivered: true, devOnly: false };
   }
 
@@ -351,14 +427,16 @@ export class UsersService {
     const role = query.role?.trim().toUpperCase();
     const filteredUsers = users.filter((user) => {
       const matchesKeyword = keyword
-        ? [user.email, user.full_name, user.phone]
-            .some((value) => value?.toLowerCase().includes(keyword))
+        ? [user.email, user.full_name, user.phone].some((value) =>
+            value?.toLowerCase().includes(keyword),
+          )
         : true;
       const matchesRole = role && role !== 'ALL' ? user.role === role : true;
 
       return matchesKeyword && matchesRole;
     });
-    const usersWithWalletCount = await this.attachWalletCountList(filteredUsers);
+    const usersWithWalletCount =
+      await this.attachWalletCountList(filteredUsers);
     const sortedUsers = usersWithWalletCount.sort((left, right) => {
       const sort = query.sort ?? 'name_asc';
 
@@ -371,7 +449,9 @@ export class UsersService {
 
       if (sort === 'birth_asc' || sort === 'birth_desc') {
         const leftTime = left?.birthday ? new Date(left.birthday).getTime() : 0;
-        const rightTime = right?.birthday ? new Date(right.birthday).getTime() : 0;
+        const rightTime = right?.birthday
+          ? new Date(right.birthday).getTime()
+          : 0;
         const result = leftTime - rightTime;
         return sort === 'birth_desc' ? -result : result;
       }
@@ -463,6 +543,17 @@ export class UsersService {
     });
 
     if (existingUser) {
+      if (
+        this.isInactiveStatus(existingUser.is_active) &&
+        this.canSelfRestore(existingUser)
+      ) {
+        throw new BadRequestException({
+          code: 'ACCOUNT_RESTORE_REQUIRED',
+          message:
+            'Email này thuộc tài khoản đã xóa. Vui lòng đăng nhập để khôi phục tài khoản.',
+        });
+      }
+
       throw new BadRequestException('Email đã tồn tại');
     }
 
@@ -549,6 +640,13 @@ export class UsersService {
         `Mật khẩu tạm: ${temporaryPassword}`,
         'Vui lòng đăng nhập và đổi mật khẩu ở lần sử dụng đầu tiên.',
       ].join('\n'),
+      {
+        html: buildNewAccountEmailHtml({
+          email,
+          temporaryPassword,
+        }),
+        sensitive: true,
+      },
     );
 
     return {
@@ -666,7 +764,8 @@ export class UsersService {
 
     await this.prisma.$executeRaw`
       UPDATE users
-      SET is_active = 0
+      SET is_active = 0,
+          deleted_at = NOW()
       WHERE id = ${id}
     `;
     const deactivatedUser = await this.prisma.users.findUnique({
@@ -698,12 +797,15 @@ export class UsersService {
     }
 
     if (this.isSuperAdmin(user)) {
-      throw new ForbiddenException('Không thể vô hiệu hóa tài khoản admin tổng');
+      throw new ForbiddenException(
+        'Không thể vô hiệu hóa tài khoản admin tổng',
+      );
     }
 
     await this.prisma.$executeRaw`
       UPDATE users
-      SET is_active = 0
+      SET is_active = 0,
+          deleted_at = NOW()
       WHERE id = ${userId}
     `;
     const deactivatedUser = await this.prisma.users.findUnique({
@@ -735,14 +837,7 @@ export class UsersService {
       throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
     }
 
-    const statusRows = await this.prisma.$queryRaw<Array<{ is_active: boolean | number | null }>>`
-      SELECT is_active
-      FROM users
-      WHERE id = ${user.id}
-      LIMIT 1
-    `;
-
-    if (statusRows[0]?.is_active === false || statusRows[0]?.is_active === 0) {
+    if (this.isInactiveStatus(user.is_active) && !this.canSelfRestore(user)) {
       throw new UnauthorizedException('Tài khoản đã bị khóa');
     }
 
@@ -752,18 +847,28 @@ export class UsersService {
       throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
     }
 
-    const tokens = await this.issueTokenPair({ id: user.id, role: user.role });
+    const restored = this.isInactiveStatus(user.is_active);
+    const activeUser = restored ? await this.restoreAccount(user.id) : user;
+    const tokens = await this.issueTokenPair({
+      id: activeUser.id,
+      role: activeUser.role,
+    });
 
     await this.prisma.admin_logs.create({
       data: {
-        admin_id: user.id,
-        action: 'Người dùng đăng nhập hệ thống',
+        admin_id: activeUser.id,
+        action: restored
+          ? 'Người dùng khôi phục tài khoản bằng đăng nhập'
+          : 'Người dùng đăng nhập hệ thống',
       },
     });
 
     return {
-      message: 'Đăng nhập thành công',
-      mustChangePassword: Boolean(user.must_change_password),
+      message: restored
+        ? 'Khôi phục tài khoản thành công'
+        : 'Đăng nhập thành công',
+      restored,
+      mustChangePassword: Boolean(activeUser.must_change_password),
       ...tokens,
     };
   }
@@ -790,7 +895,9 @@ export class UsersService {
     }
 
     if (user.role !== 'ADMIN') {
-      throw new UnauthorizedException('Chỉ tài khoản admin mới được vào web admin');
+      throw new UnauthorizedException(
+        'Chỉ tài khoản admin mới được vào web admin',
+      );
     }
 
     await this.prisma.users.update({
@@ -830,7 +937,7 @@ export class UsersService {
       where: { email },
     });
 
-    if (user?.is_active === false) {
+    if (this.isInactiveStatus(user?.is_active) && !this.canSelfRestore(user)) {
       throw new UnauthorizedException('Tài khoản đã bị khóa');
     }
 
@@ -849,6 +956,18 @@ export class UsersService {
           avatar: profile.avatar ?? null,
           must_change_password: false,
           profile_setup_completed: false,
+        },
+      });
+    } else if (this.isInactiveStatus(user.is_active)) {
+      await this.restoreAccount(user.id);
+      user = await this.prisma.users.update({
+        where: { id: user.id },
+        data: {
+          provider: 'google',
+          provider_id: profile.providerId,
+          full_name: user.full_name ?? profile.fullName ?? null,
+          avatar: user.avatar ?? profile.avatar ?? null,
+          must_change_password: false,
         },
       });
     } else {
@@ -895,7 +1014,9 @@ export class UsersService {
       const stored = rows[0];
 
       if (!stored || stored.revoked_at || stored.expires_at <= new Date()) {
-        throw new UnauthorizedException('Refresh token hết hạn hoặc đã bị thu hồi');
+        throw new UnauthorizedException(
+          'Refresh token hết hạn hoặc đã bị thu hồi',
+        );
       }
 
       const isMatch = await bcrypt.compare(refreshToken, stored.token);
@@ -934,7 +1055,10 @@ export class UsersService {
       const nextRefreshToken = `${newJti}.${secret}`;
       const hashedNextToken = await bcrypt.hash(nextRefreshToken, 12);
       const expiresAt = this.getRefreshTokenExpiry();
-      const accessToken = this.signAccessToken({ id: user.id, role: user.role });
+      const accessToken = this.signAccessToken({
+        id: user.id,
+        role: user.role,
+      });
 
       await tx.$executeRaw`
         UPDATE refresh_tokens
@@ -984,6 +1108,203 @@ export class UsersService {
       select: { id: true, email: true, is_active: true },
     });
 
+    const genericMessage = 'Nếu email tồn tại, hệ thống đã gửi mã xác nhận.';
+
+    if (!user || user.is_active === false) {
+      return { message: genericMessage };
+    }
+
+    const otp = this.generateResetOtp();
+    const hashedOtp = await bcrypt.hash(otp, 10);
+    const selector = randomBytes(12).toString('base64url');
+    const expiresAt = this.getResetExpiry(OTP_TTL_MINUTES);
+    const mail = await this.sendMail(
+      normalizedEmail,
+      'Mã xác nhận đặt lại mật khẩu Quản lý chi tiêu',
+      [
+        'Bạn vừa yêu cầu đặt lại mật khẩu.',
+        `Mã xác nhận của bạn là: ${otp}`,
+        `Mã này sẽ hết hạn sau ${OTP_TTL_MINUTES} phút.`,
+      ].join('\n'),
+      {
+        sensitive: true,
+        html: buildResetOtpEmailHtml({
+          otp,
+          expiresInMinutes: OTP_TTL_MINUTES,
+        }),
+      },
+    );
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.password_resets.deleteMany({
+        where: { email: normalizedEmail },
+      });
+
+      await tx.password_resets.create({
+        data: {
+          email: normalizedEmail,
+          selector,
+          token: hashedOtp,
+          expired_at: expiresAt,
+          used_at: null,
+          attempt_count: 0,
+          reset_token_hash: null,
+          reset_token_expired_at: null,
+          reset_token_used_at: null,
+        },
+      });
+    });
+
+    return {
+      message: genericMessage,
+      mail,
+    };
+  }
+
+  async verifyResetOtp(email: string, otp: string) {
+    const normalizedEmail = email.trim().toLowerCase();
+    const genericError = 'Mã xác nhận không hợp lệ hoặc đã hết hạn.';
+    const resetRequest = await this.prisma.password_resets.findFirst({
+      where: {
+        email: normalizedEmail,
+        used_at: null,
+      },
+      orderBy: { id: 'desc' },
+    });
+
+    const isExpired =
+      !resetRequest?.expired_at || resetRequest.expired_at <= new Date();
+    const hasTooManyAttempts =
+      Number(resetRequest?.attempt_count ?? 0) >= RESET_OTP_MAX_ATTEMPTS;
+    const isMatch =
+      resetRequest?.token && !isExpired && !hasTooManyAttempts
+        ? await bcrypt.compare(otp, resetRequest.token)
+        : false;
+
+    if (!resetRequest?.email || isExpired || hasTooManyAttempts || !isMatch) {
+      if (resetRequest?.id && !isExpired && !hasTooManyAttempts) {
+        await this.prisma.password_resets.update({
+          where: { id: resetRequest.id },
+          data: { attempt_count: { increment: 1 } },
+        });
+      }
+
+      throw new BadRequestException(genericError);
+    }
+
+    const resetSecret = randomBytes(32).toString('base64url');
+    const resetTokenHash = await bcrypt.hash(resetSecret, 10);
+    const resetTokenExpiredAt = this.getResetExpiry(RESET_TOKEN_TTL_MINUTES);
+
+    await this.prisma.password_resets.update({
+      where: { id: resetRequest.id },
+      data: {
+        reset_token_hash: resetTokenHash,
+        reset_token_expired_at: resetTokenExpiredAt,
+        reset_token_used_at: null,
+      },
+    });
+
+    return {
+      message: 'Xác thực mã thành công.',
+      reset_token: `${resetRequest.selector}.${resetSecret}`,
+    };
+  }
+
+  async resetPassword(dto: ResetPasswordDto) {
+    if (dto.new_password !== dto.confirm_password) {
+      throw new BadRequestException('Mật khẩu xác nhận không khớp');
+    }
+
+    const { selector, secret } = this.parseResetToken(dto.reset_token);
+    const resetRequest = await this.prisma.password_resets.findFirst({
+      where: {
+        selector,
+        used_at: null,
+        reset_token_used_at: null,
+      },
+    });
+
+    const isExpired =
+      !resetRequest?.reset_token_expired_at ||
+      resetRequest.reset_token_expired_at <= new Date();
+    const isMatch = resetRequest?.reset_token_hash
+      ? await bcrypt.compare(secret, resetRequest.reset_token_hash)
+      : false;
+
+    if (!resetRequest?.email || isExpired || !isMatch) {
+      throw new BadRequestException(
+        'Mã xác nhận không hợp lệ hoặc đã hết hạn.',
+      );
+    }
+
+    const user = await this.prisma.users.findUnique({
+      where: { email: resetRequest.email },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        full_name: true,
+        phone: true,
+        birthday: true,
+        address: true,
+        avatar: true,
+        currency_default: true,
+        must_change_password: true,
+        profile_setup_completed: true,
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException('Người dùng không tồn tại');
+    }
+
+    const hashedPassword = await bcrypt.hash(dto.new_password, 10);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.users.update({
+        where: { id: user.id },
+        data: {
+          password: hashedPassword,
+          must_change_password: false,
+        },
+      });
+      await tx.password_resets.update({
+        where: { id: resetRequest.id },
+        data: {
+          used_at: new Date(),
+          reset_token_used_at: new Date(),
+        },
+      });
+      await tx.$executeRaw`
+        UPDATE refresh_tokens
+        SET revoked_at = NOW()
+        WHERE user_id = ${user.id}
+          AND revoked_at IS NULL
+      `;
+    });
+
+    const tokens = await this.issueTokenPair({ id: user.id, role: user.role });
+    const nextUser = await this.attachWalletCount({
+      ...user,
+      must_change_password: false,
+    });
+
+    return {
+      message: 'Đặt lại mật khẩu thành công',
+      mustChangePassword: false,
+      ...tokens,
+      user: nextUser,
+    };
+  }
+
+  private async forgotPasswordLegacy(email: string) {
+    const normalizedEmail = email.trim().toLowerCase();
+    const user = await this.prisma.users.findUnique({
+      where: { email: normalizedEmail },
+      select: { id: true, email: true, is_active: true },
+    });
+
     const genericMessage =
       'Nếu email tồn tại, hệ thống đã gửi mật khẩu tạm thời.';
 
@@ -1001,6 +1322,12 @@ export class UsersService {
         `Mật khẩu tạm thời: ${temporaryPassword}`,
         'Vui lòng đăng nhập bằng mật khẩu tạm thời này và đổi sang mật khẩu mới ngay sau khi vào hệ thống.',
       ].join('\n'),
+      {
+        sensitive: true,
+        html: buildTemporaryPasswordEmailHtml({
+          temporaryPassword,
+        }),
+      },
     );
 
     await this.prisma.$transaction(async (tx) => {
@@ -1029,7 +1356,7 @@ export class UsersService {
       mail,
     };
   }
-  async resetPassword(dto: ResetPasswordDto) {
+  private async resetPasswordLegacy(dto: any) {
     if (dto.newPassword !== dto.confirmPassword) {
       throw new BadRequestException('Mật khẩu xác nhận không khớp');
     }
