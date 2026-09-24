@@ -1,3 +1,7 @@
+import {
+  CategoryType,
+  CategoryCashFlowGroup,
+} from './dto/create-categories.dto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { CategoriesService } from './categories.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -59,7 +63,7 @@ describe('CategoriesService', () => {
       {
         id: 3,
         name: 'Ăn uống',
-        type: 'EXPENSE',
+        type: CategoryType.EXPENSE,
         icon: 'categories/icons/expense_food.png',
         is_system: true,
         is_active: true,
@@ -68,7 +72,7 @@ describe('CategoriesService', () => {
       {
         id: 81,
         name: 'Ăn uống',
-        type: 'EXPENSE',
+        type: CategoryType.EXPENSE,
         icon: 'categories/icons/expense_food.png',
         is_system: true,
         is_active: true,
@@ -86,18 +90,18 @@ describe('CategoriesService', () => {
     prisma.categories.findFirst.mockResolvedValue({
       id: 1,
       name: 'ăn uống',
-      type: 'EXPENSE',
+      type: CategoryType.EXPENSE,
       is_system: true,
     });
 
     await expect(
-      service.create(7, { name: ' Ăn uống ', type: 'EXPENSE' }),
+      service.create(7, { name: ' Ăn uống ', type: CategoryType.EXPENSE }),
     ).rejects.toThrow('Danh mục đã tồn tại');
 
     expect(prisma.categories.findFirst).toHaveBeenCalledWith({
       where: {
         name: 'ăn uống',
-        type: 'EXPENSE',
+        type: CategoryType.EXPENSE,
         AND: [
           { OR: [{ is_active: true }, { is_active: null }] },
           { OR: [{ is_system: true }, { user_id: 7 }] },
@@ -113,17 +117,17 @@ describe('CategoriesService', () => {
     prisma.categories.create.mockResolvedValue({
       id: 10,
       name: 'gym',
-      type: 'EXPENSE',
+      type: CategoryType.EXPENSE,
       is_system: false,
       user_id: 8,
     });
 
-    await service.create(8, { name: 'Gym', type: 'EXPENSE' });
+    await service.create(8, { name: 'Gym', type: CategoryType.EXPENSE });
 
     expect(prisma.categories.findFirst).toHaveBeenCalledWith({
       where: {
         name: 'gym',
-        type: 'EXPENSE',
+        type: CategoryType.EXPENSE,
         AND: [
           { OR: [{ is_active: true }, { is_active: null }] },
           { OR: [{ is_system: true }, { user_id: 8 }] },
@@ -133,7 +137,7 @@ describe('CategoriesService', () => {
     expect(prisma.categories.create).toHaveBeenCalledWith({
       data: {
         name: 'gym',
-        type: 'EXPENSE',
+        type: CategoryType.EXPENSE,
         cash_flow_group: 'NORMAL',
         is_system: false,
         user_id: 8,
@@ -147,23 +151,23 @@ describe('CategoriesService', () => {
     prisma.categories.create.mockResolvedValue({
       id: 11,
       name: 'tra no',
-      type: 'EXPENSE',
-      cash_flow_group: 'LOAN_DEBT',
+      type: CategoryType.EXPENSE,
+      cash_flow_group: CategoryCashFlowGroup.LOAN_DEBT,
       is_system: false,
       user_id: 8,
     });
 
     await service.create(8, {
       name: 'Tra no',
-      type: 'EXPENSE',
-      cash_flow_group: 'LOAN_DEBT',
+      type: CategoryType.EXPENSE,
+      cash_flow_group: CategoryCashFlowGroup.LOAN_DEBT,
     });
 
     expect(prisma.categories.create).toHaveBeenCalledWith({
       data: {
         name: 'tra no',
-        type: 'EXPENSE',
-        cash_flow_group: 'LOAN_DEBT',
+        type: CategoryType.EXPENSE,
+        cash_flow_group: CategoryCashFlowGroup.LOAN_DEBT,
         is_system: false,
         user_id: 8,
       },
@@ -174,7 +178,7 @@ describe('CategoriesService', () => {
     prisma.categories.findUnique.mockResolvedValue({
       id: 12,
       name: 'gym',
-      type: 'EXPENSE',
+      type: CategoryType.EXPENSE,
       is_system: false,
       is_active: true,
       user_id: 7,
@@ -183,7 +187,7 @@ describe('CategoriesService', () => {
     prisma.categories.findFirst.mockResolvedValue({
       id: 1,
       name: 'ăn uống',
-      type: 'EXPENSE',
+      type: CategoryType.EXPENSE,
       is_system: true,
     });
 
@@ -194,7 +198,7 @@ describe('CategoriesService', () => {
     expect(prisma.categories.findFirst).toHaveBeenCalledWith({
       where: {
         name: 'ăn uống',
-        type: 'EXPENSE',
+        type: CategoryType.EXPENSE,
         AND: [
           { OR: [{ is_active: true }, { is_active: null }] },
           { OR: [{ is_system: true }, { user_id: 7 }] },
@@ -209,7 +213,7 @@ describe('CategoriesService', () => {
     prisma.categories.findUnique.mockResolvedValue({
       id: 22,
       name: 'gym',
-      type: 'EXPENSE',
+      type: CategoryType.EXPENSE,
       is_system: false,
       is_active: true,
       user_id: 99,
@@ -230,21 +234,21 @@ describe('CategoriesService', () => {
     prisma.categories.create.mockResolvedValue({
       id: 23,
       name: 'gym',
-      type: 'EXPENSE',
+      type: CategoryType.EXPENSE,
       is_system: false,
       user_id: 7,
     });
 
     await service.create(7, {
       name: 'Gym',
-      type: 'EXPENSE',
+      type: CategoryType.EXPENSE,
       is_system: true,
     });
 
     expect(prisma.categories.create).toHaveBeenCalledWith({
       data: {
         name: 'gym',
-        type: 'EXPENSE',
+        type: CategoryType.EXPENSE,
         cash_flow_group: 'NORMAL',
         is_system: false,
         user_id: 7,

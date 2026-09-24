@@ -15,6 +15,7 @@ export enum CategoryType {
 export enum CategoryCashFlowGroup {
   NORMAL = 'NORMAL',
   LOAN_DEBT = 'LOAN_DEBT',
+  SAVING_TRANSFER = 'SAVING_TRANSFER',
 }
 
 export class CreateCategoryDto {

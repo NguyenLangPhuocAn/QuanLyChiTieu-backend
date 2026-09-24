@@ -11,5 +11,13 @@ export class UpdateNotificationSettingsDto {
 
   @IsOptional()
   @IsBoolean()
+  cashflow_forecast_enabled?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  savings_plan_alerts_enabled?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
   system_notifications_enabled?: boolean;
 }

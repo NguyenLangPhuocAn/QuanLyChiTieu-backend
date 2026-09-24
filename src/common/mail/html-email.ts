@@ -9,6 +9,8 @@ type ReportEmailInput = {
   expense: string;
   net: string;
   transactionCount: number;
+  topCategories?: string[];
+  methodology?: string;
 };
 
 type NewAccountEmailInput = {
@@ -156,8 +158,12 @@ export const buildReportEmailHtml = (input: ReportEmailInput) =>
       ${paragraph('File Excel báo cáo chi tiêu của bạn đã được đính kèm trong email này. Dưới đây là phần tóm tắt nhanh:')}
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:0 -8px 14px;">
         <tr>${statCard('Tổng thu', input.income, '#15803d')}${statCard('Tổng chi', input.expense, '#c2410c')}</tr>
-        <tr>${statCard('Số dư kỳ', input.net, '#a16207')}${statCard('Số giao dịch', String(input.transactionCount), '#3f2a1d')}</tr>
+        <tr>${statCard('Chênh lệch thu – chi', input.net, '#a16207')}${statCard('Số giao dịch', String(input.transactionCount), '#3f2a1d')}</tr>
       </table>
+      ${paragraph('Danh mục chi nhiều nhất')}
+      ${(input.topCategories?.length ? input.topCategories : ['Không có khoản chi trong khoảng đã chọn.']).map(paragraph).join('')}
+      ${paragraph('File Excel gồm tổng quan, toàn bộ giao dịch, chi theo danh mục, thu chi theo tháng và số dư ví hiện tại.')}
+      ${input.methodology ? paragraph(input.methodology) : ''}
     `,
   });
 

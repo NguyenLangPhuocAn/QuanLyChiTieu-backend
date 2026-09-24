@@ -1573,38 +1573,4 @@ export class UsersService {
       wallet_count: await this.getWalletCount(userId),
     };
   }
-
-  async upgradeSelfToPremium(userId: number) {
-    const user = await this.prisma.users.findUnique({
-      where: { id: userId },
-      select: { id: true, role: true },
-    });
-
-    if (!user) {
-      throw new NotFoundException('Người dùng không tồn tại');
-    }
-
-    const updatedUser = await this.prisma.users.update({
-      where: { id: userId },
-      data: user.role === 'BASIC' ? { role: 'PREMIUM' } : {},
-      select: {
-        id: true,
-        email: true,
-        role: true,
-        full_name: true,
-        phone: true,
-        birthday: true,
-        address: true,
-        avatar: true,
-        currency_default: true,
-        must_change_password: true,
-        profile_setup_completed: true,
-      },
-    });
-
-    return {
-      ...updatedUser,
-      wallet_count: await this.getWalletCount(userId),
-    };
-  }
 }

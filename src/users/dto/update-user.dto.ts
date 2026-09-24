@@ -16,24 +16,27 @@ export class UpdateUserDto {
   @Matches(/^[a-zA-ZÀ-ỹ\s]+$/, {
     message: 'Tên không được chứa số',
   })
-  full_name?: string;
+  full_name?: string | null;
 
   // ================= BIRTHDAY =================
   @IsOptional()
-  @IsDateString({}, { message: 'Ngày sinh phải dạng YYYY-MM-DD' })
-  birthday?: string;
+  @IsDateString(
+    { strict: true },
+    { message: 'Ngày sinh phải là ngày hợp lệ dạng YYYY-MM-DD' },
+  )
+  birthday?: string | null;
 
   // ================= PHONE =================
   @IsOptional()
   @Matches(/^0\d{9}$/, {
     message: 'SĐT phải bắt đầu 0 và đủ 10 số',
   })
-  phone?: string;
+  phone?: string | null;
 
   // ================= ADDRESS =================
   @IsOptional()
   @IsString()
-  address?: string;
+  address?: string | null;
 
   // ================= AVATAR =================
   @IsOptional()

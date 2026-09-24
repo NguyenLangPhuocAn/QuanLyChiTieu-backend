@@ -1,4 +1,10 @@
-import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
+import {
+  CanActivate,
+  ExecutionContext,
+  Injectable,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import type { Request } from 'express';
 import * as jwt from 'jsonwebtoken';
 import { PrismaService } from '../prisma/prisma.service';
@@ -21,49 +27,64 @@ export class JwtGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<RequestWithUser>();
     const authHeader = request.headers.authorization;
 
-    if (typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
-      return false;
+    const bearer =
+      typeof authHeader === 'string'
+        ? /^Bearer\s+(\S+)$/i.exec(authHeader)
+        : null;
+    if (!bearer) throw new UnauthorizedException('Vui lòng đăng nhập lại.');
+    const secret = process.env.JWT_SECRET;
+    if (!secret)
+      throw new ServiceUnavailableException('Dịch vụ đăng nhập chưa sẵn sàng.');
+
+    let decoded: jwt.JwtPayload | string;
+    try {
+      decoded = jwt.verify(bearer[1], secret, { algorithms: ['HS256'] });
+    } catch {
+      throw new UnauthorizedException(
+        'Phiên đăng nhập đã hết hạn hoặc không hợp lệ.',
+      );
+    }
+    const userId: unknown =
+      typeof decoded === 'object' ? decoded.userId : undefined;
+    if (
+      typeof userId !== 'number' ||
+      !Number.isSafeInteger(userId) ||
+      userId <= 0
+    ) {
+      throw new UnauthorizedException('Phiên đăng nhập không hợp lệ.');
     }
 
-    const token = authHeader.split(' ')[1] ?? '';
-
+    let rows: Array<{
+      id: number;
+      email: string;
+      role: string | null;
+      is_active: boolean | number | null;
+      deleted_at: Date | null;
+    }>;
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as {
-        userId?: number;
-      };
-
-      if (!decoded.userId) {
-        return false;
-      }
-
-      const rows = await this.prisma.$queryRaw<
-        Array<{
-          id: number;
-          email: string;
-          role: string | null;
-          is_active: boolean | number | null;
-        }>
-      >`
-        SELECT id, email, role, is_active
+      rows = await this.prisma.$queryRaw<typeof rows>`
+        SELECT id, email, role, is_active, deleted_at
         FROM users
-        WHERE id = ${decoded.userId}
+        WHERE id = ${userId} AND deleted_at IS NULL
         LIMIT 1
       `;
-      const user = rows[0];
-
-      if (!user || user.is_active === false || user.is_active === 0) {
-        return false;
-      }
-
-      request.user = {
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-      };
-
-      return true;
     } catch {
-      return false;
+      throw new ServiceUnavailableException(
+        'Chưa truy cập được dữ liệu tài khoản. Vui lòng thử lại sau.',
+      );
     }
+    const user = rows[0];
+    if (
+      !user ||
+      user.is_active === false ||
+      user.is_active === 0 ||
+      user.deleted_at
+    ) {
+      throw new UnauthorizedException(
+        'Tài khoản không còn hoạt động. Vui lòng đăng nhập lại.',
+      );
+    }
+    request.user = { userId: user.id, email: user.email, role: user.role };
+    return true;
   }
 }

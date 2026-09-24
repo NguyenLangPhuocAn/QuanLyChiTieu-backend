@@ -15,6 +15,12 @@ describe('AppController', () => {
   });
 
   describe('root', () => {
+    it('identifies the API for read-only connection discovery', () => {
+      expect(appController.health()).toEqual({
+        status: 'ok',
+        service: 'quan-ly-chi-tieu',
+      });
+    });
     it('should return "Hello World!"', () => {
       expect(appController.getHello()).toBe('Hello World!');
     });

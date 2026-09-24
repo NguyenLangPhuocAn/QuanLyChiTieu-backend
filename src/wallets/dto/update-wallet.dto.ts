@@ -14,10 +14,10 @@ export class UpdateWalletDto {
   @MaxLength(50, { message: 'Tên ví không được vượt quá 50 ký tự' })
   name?: string;
 
-  // Không cho sửa trực tiếp số dư ví vì số dư phải được tính từ các giao dịch thu/chi.
+  // Service ghi một giao dịch điều chỉnh để lịch sử khớp số dư mới.
   @IsOptional()
   @Matches(/^\d+(\.\d{1,2})?$/, {
-    message: 'Số dư không được sửa trực tiếp sau khi ví đã tạo',
+    message: 'Số dư phải là số không âm và có tối đa 2 chữ số thập phân',
   })
   balance?: string;
 

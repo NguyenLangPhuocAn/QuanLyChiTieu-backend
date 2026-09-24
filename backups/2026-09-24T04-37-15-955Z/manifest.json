@@ -1,0 +1,21 @@
+{
+  "format": 1,
+  "createdAt": "2026-09-24T04:37:27.636Z",
+  "cipher": "aes-256-gcm",
+  "iv": "095874b6b9bb1eeb6fdd6300",
+  "tag": "a918c2408dd99acf4a9a7365c09956ed",
+  "plainSha256": "91a22b42695131e425cc9c127985a8f2470fe20c19d6cc80df23471f1580d08b",
+  "parts": [
+    {
+      "name": "backup.part001.enc",
+      "bytes": 41943040,
+      "sha256": "fe94c7cdffd646b018e2cdd7c9cc7b6fe0648af0ae948448c844cc6655fc2d9e"
+    },
+    {
+      "name": "backup.part002.enc",
+      "bytes": 30522811,
+      "sha256": "04207e04ccdab1ddf4a353e104454f0b58869f80cba0daa15958adb7f225b167"
+    }
+  ],
+  "description": "Workspace, private configuration, uploads, documents and consistent MySQL export; excludes dependencies, git history and generated build caches."
+}

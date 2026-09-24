@@ -53,6 +53,8 @@ describe('NotificationsService', () => {
       user_id: 7,
       budget_alerts_enabled: true,
       budget_expiring_enabled: true,
+      cashflow_forecast_enabled: true,
+      savings_plan_alerts_enabled: true,
       system_notifications_enabled: true,
     });
     const service = new NotificationsService(prisma as never);
@@ -61,6 +63,8 @@ describe('NotificationsService', () => {
       user_id: 7,
       budget_alerts_enabled: true,
       budget_expiring_enabled: true,
+      cashflow_forecast_enabled: true,
+      savings_plan_alerts_enabled: true,
       system_notifications_enabled: true,
     });
     expect(prisma.notification_settings.create).toHaveBeenCalledWith({
@@ -68,6 +72,8 @@ describe('NotificationsService', () => {
         user_id: 7,
         budget_alerts_enabled: true,
         budget_expiring_enabled: true,
+        cashflow_forecast_enabled: true,
+        savings_plan_alerts_enabled: true,
         system_notifications_enabled: true,
       },
     });
@@ -475,6 +481,66 @@ describe('NotificationsService', () => {
         source_type: 'budget',
         source_id: 21,
         dedupe_key: 'budget-expiring:21:2026-05-23',
+      }),
+    });
+  });
+
+  it('creates separate cashflow and savings plan alerts', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-20T08:00:00.000Z'));
+    const prisma = createPrismaMock();
+    prisma.$queryRaw.mockResolvedValue([
+      {
+        id: 7,
+        cashflow_forecast_enabled: 1,
+        savings_plan_alerts_enabled: 1,
+      },
+    ]);
+    prisma.notifications.create.mockResolvedValue({});
+    const financialPlansService = {
+      getOverview: jest.fn().mockResolvedValue({
+        cashflow_plans: [
+          {
+            currency: 'VND',
+            summary: {
+              status: 'RISK',
+              forecast_average_income: 5_000_000,
+              forecast_average_expense: 7_000_000,
+            },
+          },
+        ],
+        savings_plans: [
+          {
+            id: 4,
+            name: 'Mua laptop',
+            currency: 'VND',
+            status: 'BEHIND',
+            monthly_gap: 500_000,
+            remaining_amount: 5_000_000,
+          },
+        ],
+      }),
+    };
+    const service = new NotificationsService(
+      prisma as never,
+      undefined,
+      financialPlansService as never,
+    );
+
+    await expect(service.createFinancialPlanNotifications()).resolves.toEqual({
+      scannedCount: 1,
+      createdCount: 2,
+    });
+    expect(prisma.notifications.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        source_type: 'cashflow_forecast',
+        dedupe_key: 'cashflow-forecast:2026-09:VND:RISK',
+      }),
+    });
+    expect(prisma.notifications.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        source_type: 'savings_goal',
+        source_id: 4,
+        dedupe_key: 'savings-plan:4:2026-09:BEHIND',
       }),
     });
   });

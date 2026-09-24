@@ -67,7 +67,11 @@ describe('StatisticsService', () => {
       currencyService as unknown as CurrencyService,
     );
     const now = new Date();
-    const currentMonthDate = new Date(now.getFullYear(), now.getMonth(), 2);
+    const currentMonthDate = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    );
     const transactions = [
       {
         id: 1,
@@ -115,24 +119,28 @@ describe('StatisticsService', () => {
         id: 100,
         name: 'Salary',
         type: 'INCOME',
+        cash_flow_group: 'NORMAL',
         icon: 'categories/icons/income_salary.png',
       },
       {
         id: 101,
         name: 'Food',
         type: 'EXPENSE',
+        cash_flow_group: 'NORMAL',
         icon: 'categories/icons/expense_food.png',
       },
       {
         id: 102,
         name: 'Loan received',
         type: 'INCOME',
+        cash_flow_group: 'LOAN_DEBT',
         icon: 'categories/icons/expense_loan.png',
       },
       {
         id: 103,
         name: 'Debt payment',
         type: 'EXPENSE',
+        cash_flow_group: 'LOAN_DEBT',
         icon: 'categories/icons/expense_debt_payment.png',
       },
     ]);

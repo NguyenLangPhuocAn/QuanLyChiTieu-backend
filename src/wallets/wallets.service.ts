@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -44,7 +45,9 @@ export class WalletsService {
     }
 
     try {
-      return new Prisma.Decimal(rawValue);
+      const amount = new Prisma.Decimal(rawValue);
+      if (!amount.isFinite()) throw new Error('Invalid amount');
+      return amount;
     } catch {
       throw new BadRequestException('Số tiền không hợp lệ');
     }
@@ -167,6 +170,7 @@ export class WalletsService {
       FROM wallets
       WHERE user_id = ${userId}
         AND COALESCE(is_active, 1) = 1
+        AND wallet_type <> 'SAVINGS'
       ORDER BY id DESC
     `;
 
@@ -219,6 +223,7 @@ export class WalletsService {
     const currentWalletCount = await this.prisma.wallets.count({
       where: {
         user_id: userId,
+        wallet_type: { not: 'SAVINGS' },
         OR: [{ is_active: true }, { is_active: null }],
       },
     });
@@ -232,6 +237,11 @@ export class WalletsService {
       dto.currency ?? actor.currency_default,
     );
     const walletType = this.normalizeWalletType(dto.wallet_type);
+    if (walletType === 'SAVINGS') {
+      throw new BadRequestException(
+        'Ví tiết kiệm chỉ được tạo từ chức năng Mục tiêu tiết kiệm',
+      );
+    }
 
     const walletId = await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`
@@ -275,6 +285,9 @@ export class WalletsService {
     }
 
     const nextName = dto.name?.trim();
+    if (nextName !== undefined && !nextName) {
+      throw new BadRequestException('Tên ví không được để trống');
+    }
     const nextCurrency =
       dto.currency !== undefined
         ? this.currencyService.normalizeCurrency(dto.currency)
@@ -283,6 +296,11 @@ export class WalletsService {
       dto.wallet_type !== undefined
         ? this.normalizeWalletType(dto.wallet_type)
         : undefined;
+    if (wallet.wallet_type === 'SAVINGS' || nextWalletType === 'SAVINGS') {
+      throw new BadRequestException(
+        'Ví tiết kiệm chỉ được quản lý từ chức năng Mục tiêu tiết kiệm',
+      );
+    }
     const nextBalance = this.toDecimal(dto.balance);
     const hasUpdateData =
       nextName !== undefined ||
@@ -309,21 +327,46 @@ export class WalletsService {
       }
     }
 
-    if (nextCurrency && nextCurrency !== wallet.currency) {
-      const transactionCount = await this.prisma.transactions.count({
-        where: { wallet_id: id },
-      });
-
-      if (transactionCount > 0) {
-        throw new BadRequestException(
-          'Không thể đổi tiền tệ cho ví đã có giao dịch',
-        );
-      }
-    }
-
     const actor = await this.getActor(userId);
 
     await this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<WalletRow[]>`
+        SELECT id, user_id, name, wallet_type, currency, balance, is_active, deleted_at, created_at
+        FROM wallets WHERE id = ${id} FOR UPDATE
+      `;
+      const current = rows[0];
+      if (
+        !current ||
+        current.deleted_at ||
+        current.is_active === false ||
+        current.is_active === 0
+      ) {
+        throw new NotFoundException('Không tìm thấy ví');
+      }
+      if (
+        current.currency !== wallet.currency ||
+        (nextBalance !== undefined &&
+          !new Prisma.Decimal(current.balance ?? 0).equals(wallet.balance ?? 0))
+      ) {
+        throw new ConflictException(
+          'Số dư hoặc tiền tệ của ví vừa thay đổi. Vui lòng tải lại trước khi chỉnh sửa.',
+        );
+      }
+      if (nextCurrency && nextCurrency !== current.currency) {
+        const transactionCount = await tx.transactions.count({
+          where: { wallet_id: id },
+        });
+        const transferCount = await tx.wallet_transfers.count({
+          where: {
+            OR: [{ source_wallet_id: id }, { destination_wallet_id: id }],
+          },
+        });
+        if (transactionCount > 0 || transferCount > 0) {
+          throw new BadRequestException(
+            'Không thể đổi tiền tệ cho ví đã có giao dịch hoặc chuyển tiền',
+          );
+        }
+      }
       await tx.$executeRaw`
         UPDATE wallets
         SET
@@ -345,7 +388,7 @@ export class WalletsService {
           );
           const conversionSnapshot = await this.buildBalanceAdjustmentSnapshot(
             adjustmentAmount,
-            wallet.currency,
+            nextCurrency ?? current.currency,
             actor.currency_default,
           );
 
@@ -394,6 +437,12 @@ export class WalletsService {
 
     if (!this.canAccessWallet(wallet.user_id, userId)) {
       throw new BadRequestException('Bạn không có quyền xóa ví này');
+    }
+
+    if (wallet.wallet_type === 'SAVINGS') {
+      throw new BadRequestException(
+        'Vui lòng xóa mục tiêu tiết kiệm thay vì xóa ví trực tiếp',
+      );
     }
 
     await this.prisma.$transaction(async (tx) => {

@@ -1,4 +1,4 @@
-export type CashFlowType = 'normal' | 'loan_debt';
+export type CashFlowType = 'normal' | 'loan_debt' | 'saving_transfer';
 
 type ClassifiableCategory = {
   name?: string | null;
@@ -33,9 +33,29 @@ export const isLoanDebtCategory = (category?: ClassifiableCategory | null) => {
   );
 };
 
+export const isSavingTransferCategory = (
+  category?: ClassifiableCategory | null,
+) => {
+  if (category?.cash_flow_group) {
+    return normalizeText(category.cash_flow_group) === 'saving_transfer';
+  }
+
+  const combined = `${normalizeText(category?.name)} ${normalizeText(category?.icon)}`;
+  return (
+    combined.includes('expense_saving') ||
+    combined.includes('tiet kiem') ||
+    combined.includes('saving')
+  );
+};
+
 export const getCashFlowType = (
   category?: ClassifiableCategory | null,
-): CashFlowType => (isLoanDebtCategory(category) ? 'loan_debt' : 'normal');
+): CashFlowType =>
+  isLoanDebtCategory(category)
+    ? 'loan_debt'
+    : isSavingTransferCategory(category)
+      ? 'saving_transfer'
+      : 'normal';
 
 export const isNormalCashFlow = (category?: ClassifiableCategory | null) =>
   getCashFlowType(category) === 'normal';

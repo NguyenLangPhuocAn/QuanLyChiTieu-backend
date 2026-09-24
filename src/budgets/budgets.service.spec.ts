@@ -364,7 +364,9 @@ describe('BudgetsService scoped budgets', () => {
     const spentSql = getRawSql(prisma.$queryRaw as jest.Mock, 1);
     expect(spentSql).toContain('t.amount < 0');
     expect(spentSql).toContain('t.category_id =');
-    expect(spentSql).toContain("COALESCE(c.cash_flow_group, '') = 'LOAN_DEBT'");
+    expect(spentSql).toContain(
+      "COALESCE(c.cash_flow_group, 'NORMAL') <> 'NORMAL'",
+    );
     expect(result.spent).toBe(300000);
     expect(result.remaining).toBe(200000);
     expect(result.percent).toBe(60);

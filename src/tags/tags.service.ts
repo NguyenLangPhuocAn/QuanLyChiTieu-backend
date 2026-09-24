@@ -5,17 +5,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { normalizeTagName } from '../common/normalize-tag';
 
 @Injectable()
 export class TagsService {
   constructor(private prisma: PrismaService) {}
 
   private normalizeName(name?: string) {
-    const normalized = name
-      ?.trim()
-      .replace(/^#+/, '')
-      .toLowerCase()
-      .slice(0, 50);
+    const normalized = normalizeTagName(name ?? '');
 
     if (!normalized) {
       throw new BadRequestException('Vui lòng nhập tên hashtag.');
@@ -134,7 +131,7 @@ export class TagsService {
       throw new NotFoundException('Hashtag không tồn tại.');
     }
 
-    if (sourceTag.name === normalizedTargetName) {
+    if (normalizeTagName(sourceTag.name) === normalizedTargetName) {
       return this.withUsageCount(userId);
     }
 
@@ -149,6 +146,9 @@ export class TagsService {
             user_id: userId,
           },
         }));
+
+      // Database collation can match alternate spellings to the source itself.
+      if (targetTag.id === sourceTag.id) return;
 
       const sourceLinks = await tx.transaction_tags.findMany({
         where: { tag_id: id },

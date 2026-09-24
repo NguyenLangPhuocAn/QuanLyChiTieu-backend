@@ -3,6 +3,8 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
+  ConflictException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import ExcelJS from 'exceljs';
@@ -15,6 +17,9 @@ const nodemailer = nodemailerModule as unknown as {
     host: string;
     port: number;
     secure: boolean;
+    connectionTimeout: number;
+    greetingTimeout: number;
+    socketTimeout: number;
     auth?: { user: string; pass: string };
   }): {
     sendMail(options: {
@@ -30,7 +35,7 @@ const nodemailer = nodemailerModule as unknown as {
         contentType?: string;
         cid?: string;
       }>;
-    }): Promise<unknown>;
+    }): Promise<{ accepted?: unknown[]; rejected?: unknown[] }>;
   };
 };
 import { CurrencyService } from '../currency/currency.service';
@@ -41,10 +46,15 @@ import {
   buildReportEmailHtml,
 } from '../common/mail/html-email';
 import type { StatisticsPeriod } from './statistics.service';
+import { analyzeReportRows } from './report-analysis';
 
 type ReportFormat = 'excel' | 'pdf';
 export type ReportPeriod = StatisticsPeriod | 'quarter' | 'custom';
-type ReportDateRange = { dateFrom?: string; dateTo?: string };
+type ReportDateRange = {
+  dateFrom?: string;
+  dateTo?: string;
+  walletId?: number;
+};
 
 const periodLabels: Record<ReportPeriod, string> = {
   all: 'tất cả',
@@ -105,6 +115,7 @@ const isEmail = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
 @Injectable()
 export class ReportsService {
+  private readonly sendingUsers = new Set<number>();
   constructor(
     private prisma: PrismaService,
     private currencyService: CurrencyService,
@@ -255,9 +266,19 @@ export class ReportsService {
       user.currency_default,
     );
     const range = this.getPeriodRange(period, requestedRange);
+    if (
+      requestedRange.walletId !== undefined &&
+      (!Number.isSafeInteger(requestedRange.walletId) ||
+        requestedRange.walletId <= 0)
+    ) {
+      throw new BadRequestException('Ví báo cáo không hợp lệ');
+    }
     const wallets = await this.prisma.wallets.findMany({
       where: {
         user_id: userId,
+        ...(requestedRange.walletId === undefined
+          ? {}
+          : { id: requestedRange.walletId }),
       },
       select: {
         id: true,
@@ -269,6 +290,9 @@ export class ReportsService {
       orderBy: { id: 'asc' },
     });
     const walletIds = wallets.map((wallet) => wallet.id);
+    if (requestedRange.walletId !== undefined && !walletIds.length) {
+      throw new NotFoundException('Không tìm thấy ví báo cáo');
+    }
     const walletMap = new Map(wallets.map((wallet) => [wallet.id, wallet]));
     const transactions: ReportTransaction[] = walletIds.length
       ? await this.prisma.transactions.findMany({
@@ -422,9 +446,40 @@ export class ReportsService {
     email: string,
     requestedRange: ReportDateRange = {},
   ) {
-    const recipient = email.trim().toLowerCase();
+    if (this.sendingUsers.has(userId)) {
+      throw new ConflictException(
+        'Một báo cáo đang được gửi. Vui lòng chờ kết quả trước khi gửi tiếp.',
+      );
+    }
+    this.sendingUsers.add(userId);
+    try {
+      return await this.deliverExcelReport(
+        userId,
+        role,
+        period,
+        email,
+        requestedRange,
+      );
+    } finally {
+      this.sendingUsers.delete(userId);
+    }
+  }
 
-    if (!isEmail(recipient)) {
+  private async deliverExcelReport(
+    userId: number,
+    role: string | null,
+    period: ReportPeriod,
+    email: string,
+    requestedRange: ReportDateRange = {},
+  ) {
+    const recipient =
+      typeof email === 'string' ? email.trim().toLowerCase() : '';
+
+    if (
+      typeof email !== 'string' ||
+      email.length > 254 ||
+      !isEmail(recipient)
+    ) {
       throw new BadRequestException('Email nhận báo cáo chưa hợp lệ');
     }
 
@@ -436,6 +491,17 @@ export class ReportsService {
     );
     const report = await this.exportExcel(data);
     const rangeLabel = `${formatDate(data.range.start)} - ${formatDate(new Date(data.range.end.getTime() - 1))}`;
+    const analysis = analyzeReportRows(data.rows);
+    const money = (amount: number) =>
+      `${amount.toLocaleString('vi-VN', { maximumFractionDigits: data.displayCurrency === 'VND' ? 0 : 2 })} ${data.displayCurrency}`;
+    const topCategories = analysis.categories
+      .slice(0, 5)
+      .map(
+        (row) =>
+          `${row.category}: ${money(row.amount)} (${row.percent.toFixed(1)}%), ${row.count} giao dịch`,
+      );
+    const methodology =
+      'Chỉ tính thu/chi thông thường; loại trừ chuyển nội bộ và vay/nợ. Chênh lệch thu – chi không phải số dư ví. Các khoản được quy đổi về tiền tệ báo cáo; ưu tiên giá trị quy đổi đã lưu, nếu chưa có dùng tỷ giá tại lúc tạo báo cáo.';
     const html = buildReportEmailHtml({
       recipientName: data.user.full_name || data.user.email,
       periodLabel: periodLabels[period],
@@ -444,6 +510,8 @@ export class ReportsService {
       expense: `${data.summary.expense.toLocaleString('vi-VN')} ${data.displayCurrency}`,
       net: `${data.summary.net.toLocaleString('vi-VN')} ${data.displayCurrency}`,
       transactionCount: data.summary.transactionCount,
+      topCategories,
+      methodology,
     });
     const mail = await this.sendMail(
       recipient,
@@ -455,6 +523,16 @@ export class ReportsService {
         `Kỳ báo cáo: ${formatDate(data.range.start)} - ${formatDate(new Date(data.range.end.getTime() - 1))}`,
         `Tổng thu: ${data.summary.income.toLocaleString('vi-VN')} ${data.displayCurrency}`,
         `Tổng chi: ${data.summary.expense.toLocaleString('vi-VN')} ${data.displayCurrency}`,
+        `Chênh lệch thu – chi: ${money(data.summary.net)}`,
+        `Số giao dịch: ${data.summary.transactionCount}`,
+        '',
+        'Danh mục chi nhiều nhất:',
+        ...(topCategories.length
+          ? topCategories
+          : ['Không có khoản chi trong khoảng đã chọn.']),
+        '',
+        'File Excel gồm: tổng quan, toàn bộ giao dịch, chi theo danh mục, thu chi theo tháng và số dư ví hiện tại.',
+        methodology,
       ].join('\n'),
       {
         filename: report.filename,
@@ -465,9 +543,8 @@ export class ReportsService {
     );
 
     return {
-      message: mail.devOnly
-        ? 'Đã tạo báo cáo. Chưa cấu hình email nên hệ thống ghi log ở chế độ dev.'
-        : 'Đã gửi báo cáo Excel đến email của bạn.',
+      message:
+        'Máy chủ email đã tiếp nhận báo cáo. Vui lòng kiểm tra hộp thư đến và thư rác.',
       filename: report.filename,
       mail,
     };
@@ -483,30 +560,46 @@ export class ReportsService {
     const host = process.env.SMTP_HOST;
     const user = process.env.SMTP_USER;
     const pass = process.env.SMTP_PASS;
-    const from = process.env.SMTP_FROM ?? user;
+    const from = process.env.SMTP_FROM?.trim() || user;
 
     if (!host || !from) {
-      console.log(`[MAIL:DEV] To: ${to}\nSubject: ${subject}\n${text}`);
-      return { delivered: false, devOnly: true };
+      throw new ServiceUnavailableException(
+        'Chưa cấu hình dịch vụ email. Báo cáo chưa được gửi; bạn có thể tải file về máy.',
+      );
     }
 
     const transporter = nodemailer.createTransport({
       host,
       port: Number(process.env.SMTP_PORT ?? 587),
       secure: process.env.SMTP_SECURE === 'true',
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 20000,
       auth: user && pass ? { user, pass } : undefined,
     });
 
-    await transporter.sendMail({
-      from,
-      to,
-      subject,
-      text,
-      html: options.html,
-      attachments: [attachment, ...buildEmailInlineAttachments()],
-    });
+    let result: { accepted?: unknown[]; rejected?: unknown[] };
+    try {
+      result = await transporter.sendMail({
+        from,
+        to,
+        subject,
+        text,
+        html: options.html,
+        attachments: [attachment, ...buildEmailInlineAttachments()],
+      });
+    } catch {
+      throw new ServiceUnavailableException(
+        'Chưa xác nhận được máy chủ email đã nhận báo cáo. Hãy kiểm tra hộp thư trước khi gửi lại hoặc tải file về máy.',
+      );
+    }
+    if (!result.accepted?.length || result.rejected?.length) {
+      throw new ServiceUnavailableException(
+        'Máy chủ email chưa chấp nhận địa chỉ nhận báo cáo. Vui lòng kiểm tra email hoặc tải file về máy.',
+      );
+    }
 
-    return { delivered: true, devOnly: false };
+    return { delivered: false, accepted: true, devOnly: false };
   }
 
   private async exportExcel(
@@ -533,8 +626,23 @@ export class ReportsService {
       { label: 'Tiền tệ', value: data.displayCurrency },
       { label: 'Tổng thu', value: data.summary.income },
       { label: 'Tổng chi', value: data.summary.expense },
-      { label: 'Số dư kỳ', value: data.summary.net },
+      { label: 'Chênh lệch thu – chi', value: data.summary.net },
       { label: 'Số giao dịch', value: data.summary.transactionCount },
+      { label: 'Thời điểm tạo', value: new Date().toISOString() },
+      {
+        label: 'Phạm vi',
+        value: 'Thu/chi thông thường; không gồm chuyển nội bộ và vay/nợ.',
+      },
+      {
+        label: 'Quy đổi',
+        value:
+          'Ưu tiên số tiền quy đổi đã lưu; nếu chưa có dùng tỷ giá khi tạo báo cáo.',
+      },
+      {
+        label: 'Lưu ý số dư',
+        value:
+          'Số dư trong sheet Ví là hiện tại, không phải số dư cuối kỳ báo cáo.',
+      },
     ]);
     summarySheet.getRow(1).font = { bold: true };
 
@@ -565,13 +673,36 @@ export class ReportsService {
     );
     transactionSheet.getRow(1).font = { bold: true };
     transactionSheet.getColumn('amount').numFmt = '#,##0.00';
+    const analysis = analyzeReportRows(data.rows);
+    const categorySheet = workbook.addWorksheet('Chi theo danh muc');
+    categorySheet.columns = [
+      { header: 'Danh mục', key: 'category', width: 28 },
+      { header: 'Tổng chi', key: 'amount', width: 20 },
+      { header: 'Tỷ trọng (%)', key: 'percent', width: 16 },
+      { header: 'Số giao dịch', key: 'count', width: 16 },
+    ];
+    categorySheet.addRows(analysis.categories);
+    categorySheet.getColumn('amount').numFmt = '#,##0.00';
+    categorySheet.getColumn('percent').numFmt = '0.0';
+    const monthlySheet = workbook.addWorksheet('Thu chi theo thang');
+    monthlySheet.columns = [
+      { header: 'Tháng', key: 'month', width: 16 },
+      { header: 'Tổng thu', key: 'income', width: 20 },
+      { header: 'Tổng chi', key: 'expense', width: 20 },
+      { header: 'Chênh lệch thu – chi', key: 'net', width: 24 },
+      { header: 'Số giao dịch', key: 'count', width: 16 },
+    ];
+    monthlySheet.addRows(analysis.months);
+    ['income', 'expense', 'net'].forEach((key) => {
+      monthlySheet.getColumn(key).numFmt = '#,##0.00';
+    });
 
     const walletSheet = workbook.addWorksheet('Vi');
     walletSheet.columns = [
       { header: 'Tên ví', key: 'name', width: 24 },
       { header: 'Loại ví', key: 'type', width: 16 },
       { header: 'Tiền tệ', key: 'currency', width: 10 },
-      { header: 'Số dư', key: 'balance', width: 18 },
+      { header: 'Số dư hiện tại', key: 'balance', width: 22 },
     ];
     walletSheet.addRows(
       data.wallets.map((wallet) => ({
@@ -583,6 +714,21 @@ export class ReportsService {
     );
     walletSheet.getRow(1).font = { bold: true };
     walletSheet.getColumn('balance').numFmt = '#,##0.00';
+    workbook.eachSheet((sheet) => {
+      sheet.views = [{ state: 'frozen', ySplit: 1 }];
+      sheet.getRow(1).font = { bold: true };
+      sheet.getRow(1).height = 26;
+      if (sheet !== summarySheet)
+        sheet.autoFilter = {
+          from: { row: 1, column: 1 },
+          to: { row: Math.max(1, sheet.rowCount), column: sheet.columnCount },
+        };
+    });
+    summarySheet.getColumn('value').width = 85;
+    summarySheet.getColumn('value').alignment = {
+      wrapText: true,
+      vertical: 'top',
+    };
 
     const buffer = await workbook.xlsx.writeBuffer();
     const fileDate = formatFileDate(new Date());
@@ -656,17 +802,17 @@ export class ReportsService {
       `Tổng chi: ${data.summary.expense.toLocaleString('vi-VN')} ${data.displayCurrency}`,
     );
     doc.text(
-      `Số dư kỳ: ${data.summary.net.toLocaleString('vi-VN')} ${data.displayCurrency}`,
+      `Chênh lệch thu – chi: ${data.summary.net.toLocaleString('vi-VN')} ${data.displayCurrency}`,
     );
     doc.text(`Số giao dịch: ${data.summary.transactionCount}`);
     doc.moveDown();
 
     useBold();
-    doc.fontSize(12).text('Giao dịch gần nhất');
+    doc.fontSize(12).text('Giao dịch trong kỳ (đầy đủ, theo ngày tăng dần)');
     useRegular();
     doc.moveDown(0.3);
 
-    data.rows.slice(0, 28).forEach((row) => {
+    data.rows.forEach((row) => {
       doc
         .fontSize(9)
         .text(

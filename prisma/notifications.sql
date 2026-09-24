@@ -3,6 +3,8 @@ CREATE TABLE IF NOT EXISTS notification_settings (
   user_id INT NOT NULL,
   budget_alerts_enabled BOOLEAN DEFAULT TRUE,
   budget_expiring_enabled BOOLEAN DEFAULT TRUE,
+  cashflow_forecast_enabled BOOLEAN DEFAULT TRUE,
+  savings_plan_alerts_enabled BOOLEAN DEFAULT TRUE,
   system_notifications_enabled BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

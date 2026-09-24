@@ -63,6 +63,7 @@ export class StatisticsController {
     @Query('format') format?: 'excel' | 'pdf',
     @Query('dateFrom') dateFrom?: string,
     @Query('dateTo') dateTo?: string,
+    @Query('walletId') walletId?: string,
   ) {
     if (
       period &&
@@ -82,7 +83,11 @@ export class StatisticsController {
       req.user.role ?? null,
       period ?? 'month',
       format ?? 'excel',
-      { dateFrom, dateTo },
+      {
+        dateFrom,
+        dateTo,
+        ...(walletId === undefined ? {} : { walletId: Number(walletId) }),
+      },
     );
   }
 
@@ -95,6 +100,7 @@ export class StatisticsController {
       period?: ReportPeriod;
       dateFrom?: string;
       dateTo?: string;
+      walletId?: number;
     },
   ) {
     if (
@@ -106,7 +112,7 @@ export class StatisticsController {
       throw new BadRequestException('Kỳ thống kê không hợp lệ');
     }
 
-    if (!body.email) {
+    if (typeof body.email !== 'string' || !body.email.trim()) {
       throw new BadRequestException('Vui lòng nhập email nhận báo cáo');
     }
 
@@ -115,7 +121,11 @@ export class StatisticsController {
       req.user.role ?? null,
       body.period ?? 'month',
       body.email,
-      { dateFrom: body.dateFrom, dateTo: body.dateTo },
+      {
+        dateFrom: body.dateFrom,
+        dateTo: body.dateTo,
+        ...(body.walletId === undefined ? {} : { walletId: body.walletId }),
+      },
     );
   }
 }

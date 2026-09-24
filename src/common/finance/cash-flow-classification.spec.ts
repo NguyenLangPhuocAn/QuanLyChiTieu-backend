@@ -17,4 +17,14 @@ describe('cash-flow classification', () => {
       }),
     ).toBe('normal');
   });
+
+  it('separates legacy saving categories from income and expense statistics', () => {
+    expect(
+      getCashFlowType({
+        name: 'Tiết kiệm',
+        icon: 'categories/icons/expense_saving.png',
+        cash_flow_group: 'SAVING_TRANSFER',
+      }),
+    ).toBe('saving_transfer');
+  });
 });

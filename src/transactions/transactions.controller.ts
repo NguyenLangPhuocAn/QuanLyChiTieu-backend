@@ -16,12 +16,14 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
+import { memoryStorage } from 'multer';
 import { join } from 'path';
 import { JwtGuard } from '../auth/jwt.guard';
 import {
   createImageUploadOptions,
   deleteUploadedFile,
   IMAGE_UPLOAD_LIMITS,
+  imageFileFilter,
 } from '../common/upload/image-upload-options';
 import {
   CreateTransactionDto,
@@ -29,6 +31,8 @@ import {
 } from './dto/create-transaction.dto';
 import { UpdateTransactionDto } from './dto/update-transaction.dto';
 import { TransactionsService } from './transactions.service';
+import { ReceiptOcrService } from './receipt-ocr.service';
+import { parseQueryInteger } from './parse-query-integer';
 
 type AuthenticatedRequest = Request & {
   user: {
@@ -41,7 +45,10 @@ const receiptUploadDir = join(process.cwd(), 'uploads', 'receipts');
 @Controller('transactions')
 @UseGuards(JwtGuard)
 export class TransactionsController {
-  constructor(private transactionsService: TransactionsService) {}
+  constructor(
+    private transactionsService: TransactionsService,
+    private receiptOcrService: ReceiptOcrService,
+  ) {}
 
   @Get()
   findAll(
@@ -58,9 +65,19 @@ export class TransactionsController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
+    if (type !== undefined && type !== 'INCOME' && type !== 'EXPENSE') {
+      throw new BadRequestException('Loại giao dịch không hợp lệ.');
+    }
+    if (
+      cashFlow !== undefined &&
+      cashFlow !== 'normal' &&
+      cashFlow !== 'loan_debt'
+    ) {
+      throw new BadRequestException('Nhóm dòng tiền không hợp lệ.');
+    }
     return this.transactionsService.findAll(req.user.userId, {
-      walletId: walletId ? Number(walletId) : undefined,
-      categoryId: categoryId ? Number(categoryId) : undefined,
+      walletId: parseQueryInteger(walletId, 'Mã ví'),
+      categoryId: parseQueryInteger(categoryId, 'Mã danh mục'),
       type: type ? TransactionType[type] : undefined,
       cashFlow,
       tag,
@@ -68,8 +85,8 @@ export class TransactionsController {
       note,
       from,
       to,
-      page: page ? Number(page) : undefined,
-      limit: limit ? Number(limit) : undefined,
+      page: parseQueryInteger(page, 'Trang'),
+      limit: parseQueryInteger(limit, 'Số kết quả'),
     });
   }
 
@@ -112,6 +129,27 @@ export class TransactionsController {
     );
 
     return transaction;
+  }
+
+  @Post('receipt-ocr')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      fileFilter: imageFileFilter,
+      limits: {
+        fileSize: IMAGE_UPLOAD_LIMITS.receipt.fileSize,
+        files: 1,
+      },
+    }),
+  )
+  analyzeReceipt(
+    @Req() req: AuthenticatedRequest,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) {
+      throw new BadRequestException('Vui lòng chọn ảnh hóa đơn');
+    }
+    return this.receiptOcrService.analyze(req.user.userId, file);
   }
 
   @Post(':id/receipt')

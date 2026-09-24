@@ -7,6 +7,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { BudgetsService } from '../budgets/budgets.service';
+import { FinancialPlansService } from '../financial-plans/financial-plans.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CreateBroadcastDto,
@@ -72,11 +73,18 @@ type BroadcastListRow = {
   revoked_at: Date | null;
 };
 
+type FinancialPlanUserRow = {
+  id: number;
+  cashflow_forecast_enabled: boolean | number;
+  savings_plan_alerts_enabled: boolean | number;
+};
+
 @Injectable()
 export class NotificationsService {
   constructor(
     private prisma: PrismaService,
     @Optional() private budgetsService?: BudgetsService,
+    @Optional() private financialPlansService?: FinancialPlansService,
   ) {}
 
   private normalizePage(page?: number) {
@@ -136,6 +144,8 @@ export class NotificationsService {
           user_id: userId,
           budget_alerts_enabled: true,
           budget_expiring_enabled: true,
+          cashflow_forecast_enabled: true,
+          savings_plan_alerts_enabled: true,
           system_notifications_enabled: true,
         },
       });
@@ -167,6 +177,12 @@ export class NotificationsService {
           : {}),
         ...(dto.budget_expiring_enabled !== undefined
           ? { budget_expiring_enabled: dto.budget_expiring_enabled }
+          : {}),
+        ...(dto.cashflow_forecast_enabled !== undefined
+          ? { cashflow_forecast_enabled: dto.cashflow_forecast_enabled }
+          : {}),
+        ...(dto.savings_plan_alerts_enabled !== undefined
+          ? { savings_plan_alerts_enabled: dto.savings_plan_alerts_enabled }
           : {}),
         ...(dto.system_notifications_enabled !== undefined
           ? { system_notifications_enabled: dto.system_notifications_enabled }
@@ -371,6 +387,86 @@ export class NotificationsService {
     }
 
     return { scannedCount: budgets.length, createdCount };
+  }
+
+  async createFinancialPlanNotifications() {
+    if (!this.financialPlansService) {
+      return { scannedCount: 0, createdCount: 0 };
+    }
+
+    const users = await this.prisma.$queryRaw<FinancialPlanUserRow[]>`
+      SELECT
+        u.id,
+        COALESCE(ns.cashflow_forecast_enabled, 1) AS cashflow_forecast_enabled,
+        COALESCE(ns.savings_plan_alerts_enabled, 1) AS savings_plan_alerts_enabled
+      FROM users u
+      LEFT JOIN notification_settings ns ON ns.user_id = u.id
+      WHERE u.deleted_at IS NULL
+        AND COALESCE(u.is_active, 1) = 1
+    `;
+    const now = new Date();
+    const periodKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const money = (value: number, currency: string) =>
+      `${new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 0 }).format(value)} ${currency}`;
+    let createdCount = 0;
+
+    for (const user of users) {
+      const overview = await this.financialPlansService.getOverview(
+        user.id,
+        now,
+      );
+
+      if (
+        user.cashflow_forecast_enabled !== false &&
+        user.cashflow_forecast_enabled !== 0
+      ) {
+        for (const plan of overview.cashflow_plans) {
+          if (!['RISK', 'WARNING'].includes(plan.summary.status)) continue;
+          const isRisk = plan.summary.status === 'RISK';
+          const created = await this.createForUser({
+            userId: user.id,
+            type: 'SYSTEM',
+            severity: isRisk ? 'CRITICAL' : 'WARNING',
+            title: isRisk
+              ? 'Dự báo dòng tiền có nguy cơ âm'
+              : 'Dự báo chi tiêu đang tăng',
+            message: isRisk
+              ? `Trong 4 tháng tới, chi trung bình dự kiến ${money(plan.summary.forecast_average_expense, plan.currency)}, cao hơn thu trung bình ${money(plan.summary.forecast_average_income, plan.currency)}.`
+              : `Chi trung bình 4 tháng tới dự kiến ${money(plan.summary.forecast_average_expense, plan.currency)}, tăng so với 4 tháng trước.`,
+            sourceType: 'cashflow_forecast',
+            dedupeKey: `cashflow-forecast:${periodKey}:${plan.currency}:${plan.summary.status}`,
+          });
+          if (created) createdCount += 1;
+        }
+      }
+
+      if (
+        user.savings_plan_alerts_enabled !== false &&
+        user.savings_plan_alerts_enabled !== 0
+      ) {
+        for (const plan of overview.savings_plans) {
+          if (!['BEHIND', 'OVERDUE'].includes(plan.status)) continue;
+          const overdue = plan.status === 'OVERDUE';
+          const created = await this.createForUser({
+            userId: user.id,
+            type: 'SYSTEM',
+            severity: overdue ? 'CRITICAL' : 'WARNING',
+            title: overdue
+              ? 'Mục tiêu tiết kiệm đã quá hạn'
+              : 'Kế hoạch tiết kiệm đang chậm',
+            message: overdue
+              ? `${plan.name} chưa đạt mục tiêu. Còn thiếu ${money(plan.remaining_amount, plan.currency)}.`
+              : `${plan.name} đang chậm tiến độ tháng này. Nên góp thêm ${money(plan.monthly_gap, plan.currency)} để bám kế hoạch.`,
+            sourceType: 'savings_goal',
+            sourceId: plan.id,
+            dedupeKey: `savings-plan:${plan.id}:${periodKey}:${plan.status}`,
+          });
+          if (created) createdCount += 1;
+        }
+      }
+    }
+
+    return { scannedCount: users.length, createdCount };
   }
 
   async createBroadcast(adminId: number, dto: CreateBroadcastDto) {

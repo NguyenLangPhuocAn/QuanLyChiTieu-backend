@@ -5,6 +5,7 @@ import {
   Post,
   Query,
   Redirect,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { UsersService } from '../users/users.service';
@@ -97,7 +98,7 @@ export class GoogleController {
 
   @Post('google/mobile')
   async googleMobile(@Body('idToken') idToken?: string) {
-    if (!idToken) {
+    if (typeof idToken !== 'string' || !idToken.trim()) {
       throw new UnauthorizedException('Thiếu Google idToken');
     }
 
@@ -132,6 +133,7 @@ export class GoogleController {
         redirect_uri: callbackUrl,
         grant_type: 'authorization_code',
       }),
+      signal: AbortSignal.timeout(10000),
     });
     const tokenData = (await tokenResponse.json()) as GoogleTokenResponse;
 
@@ -143,57 +145,55 @@ export class GoogleController {
       );
     }
 
-    const profileResponse = await fetch(
-      `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(
-        tokenData.id_token,
-      )}`,
-    );
-    const profile = (await profileResponse.json()) as GoogleProfile;
-
-    if (
-      !profileResponse.ok ||
-      !profile.sub ||
-      !profile.email ||
-      profile.email_verified === false ||
-      profile.email_verified === 'false'
-    ) {
-      throw new UnauthorizedException(
-        'Google email không hợp lệ hoặc chưa xác minh',
-      );
-    }
-
-    return profile;
+    return this.verifyGoogleIdToken(tokenData.id_token, [clientId]);
   }
 
-  private async verifyGoogleIdToken(idToken: string): Promise<GoogleProfile> {
-    const profileResponse = await fetch(
-      `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(
-        idToken,
-      )}`,
-    );
-    const profile = (await profileResponse.json()) as GoogleProfile;
-
-    if (
-      !profileResponse.ok ||
-      !profile.sub ||
-      !profile.email ||
-      profile.email_verified === false ||
-      profile.email_verified === 'false'
-    ) {
-      throw new UnauthorizedException('Google idToken không hợp lệ');
-    }
-
-    const allowedAudiences = [
+  private async verifyGoogleIdToken(
+    idToken: string,
+    allowedAudiences = [
       process.env.GOOGLE_WEB_CLIENT_ID,
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_ANDROID_CLIENT_ID,
       process.env.GOOGLE_IOS_CLIENT_ID,
-    ].filter(Boolean);
+    ]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value)),
+  ): Promise<GoogleProfile> {
+    if (!allowedAudiences.length) {
+      throw new ServiceUnavailableException(
+        'Đăng nhập Google chưa được cấu hình. Hãy dùng email và mật khẩu.',
+      );
+    }
+    let profileResponse: Response;
+    let profile: GoogleProfile;
+    try {
+      profileResponse = await fetch(
+        `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`,
+        { signal: AbortSignal.timeout(10000) },
+      );
+      if (profileResponse.status >= 500 || profileResponse.status === 429) {
+        throw new Error('Google unavailable');
+      }
+      profile = (await profileResponse.json()) as GoogleProfile;
+    } catch {
+      throw new ServiceUnavailableException(
+        'Chưa kết nối được dịch vụ đăng nhập Google. Vui lòng thử lại sau.',
+      );
+    }
 
     if (
-      allowedAudiences.length > 0 &&
-      (!profile.aud || !allowedAudiences.includes(profile.aud))
+      !profileResponse.ok ||
+      !profile ||
+      typeof profile.sub !== 'string' ||
+      !profile.sub.trim() ||
+      typeof profile.email !== 'string' ||
+      !profile.email.trim() ||
+      (profile.email_verified !== true && profile.email_verified !== 'true')
     ) {
+      throw new UnauthorizedException('Google idToken không hợp lệ');
+    }
+
+    if (!profile.aud || !allowedAudiences.includes(profile.aud)) {
       throw new UnauthorizedException('Google client ID không khớp cấu hình');
     }
 

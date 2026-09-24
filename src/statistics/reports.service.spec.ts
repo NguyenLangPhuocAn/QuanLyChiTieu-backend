@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Prisma } from '@prisma/client';
 import { ReportsService } from './reports.service';
 import type { StatisticsPeriod } from './statistics.service';
@@ -36,7 +36,7 @@ type MailResult = {
   devOnly: boolean;
 };
 
-type ReportsServiceTestAccess = ReportsService & {
+type ReportsServiceTestAccess = Pick<ReportsService, 'sendExcelReport'> & {
   buildReportData(
     userId: number,
     role: string | null,
@@ -172,11 +172,9 @@ describe('ReportsService', () => {
       currencyService as never,
     );
 
-    const data = await (service as ReportsServiceTestAccess).buildReportData(
-      1,
-      'PREMIUM',
-      'month',
-    );
+    const data = await (
+      service as unknown as ReportsServiceTestAccess
+    ).buildReportData(1, 'PREMIUM', 'month');
 
     expect(data.summary).toEqual(
       expect.objectContaining({
@@ -201,7 +199,7 @@ describe('ReportsService', () => {
     const service = new ReportsService(
       {} as never,
       currencyService as never,
-    ) as ReportsServiceTestAccess;
+    ) as unknown as ReportsServiceTestAccess;
     const data: ReportData = {
       user: {
         email: 'user@example.com',
@@ -246,6 +244,6 @@ describe('ReportsService', () => {
         html: expect.stringContaining('<html'),
       }),
     );
-    expect(sendMail.mock.calls[0][4].html).toContain('Quản tiền rõ ràng');
+    expect(sendMail.mock.calls[0][4]?.html).toContain('Quản tiền rõ ràng');
   });
 });

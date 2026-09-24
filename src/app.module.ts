@@ -17,6 +17,10 @@ import { TagsModule } from './tags/tags.module';
 import { BudgetsModule } from './budgets/budgets.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { LoanDebtsModule } from './loan-debts/loan-debts.module';
+import { SavingsModule } from './savings/savings.module';
+import { ChatbotModule } from './chatbot/chatbot.module';
+import { PaymentsModule } from './payments/payments.module';
+import { FinancialPlansModule } from './financial-plans/financial-plans.module';
 
 @Module({
   imports: [
@@ -43,6 +47,10 @@ import { LoanDebtsModule } from './loan-debts/loan-debts.module';
     AuthModule,
     NotificationsModule,
     LoanDebtsModule,
+    SavingsModule,
+    ChatbotModule,
+    PaymentsModule,
+    FinancialPlansModule,
   ],
   controllers: [AppController],
   providers: [AppService],

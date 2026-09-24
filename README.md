@@ -21,11 +21,38 @@
   <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
   [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
 
+## Chatbot AI
+
+Chatbot gọi Gemini API từ backend; không đặt API key trong ứng dụng mobile.
+Thêm `GEMINI_API_KEY` và `GEMINI_MODEL=gemini-2.5-flash-lite` vào file `.env`
+cục bộ. Có thể đặt `GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta`
+khi cần ghi đè
+endpoint mặc định.
+
+Mobile gọi `POST /chatbot/messages` với access token, `conversation_id` và câu
+hỏi mới trong trường `message`. Backend tự lấy tối đa 8 tin nhắn gần nhất của
+đúng cuộc trò chuyện làm ngữ cảnh. Lịch sử được tải từng trang qua `limit` và
+`before_id`; danh sách cuộc trò chuyện dùng cursor trả về từ API. Backend chỉ
+gửi dữ liệu tài chính đã tổng hợp trong 120 ngày; không gửi email, số điện thoại,
+mật khẩu, ghi chú giao dịch hoặc tên người vay/nợ. Chatbot không có quyền tự tạo
+giao dịch hay chuyển tiền.
+
+## VNPay Sandbox
+
+Premium được nâng cấp qua đơn thanh toán VNPay, không còn endpoint tự nâng role.
+Sao chép các biến `VNPAY_*` từ `.env.example` vào `.env`, dùng TmnCode và Hash
+Secret do VNPay Sandbox cấp. Đăng ký IPN URL công khai là
+`https://YOUR_BACKEND/payments/vnpay/ipn`; return URL là
+`https://YOUR_BACKEND/payments/vnpay/return`. Backend xác minh HMAC-SHA512, mã
+đơn và số tiền trước khi cập nhật tài khoản.
+
 ## Description
 
 [Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
 
 ## Project setup
+
+Hướng dẫn chạy thử trên laptop, kiểm tra kết nối điện thoại và các bước phục hồi: [LAPTOP_SERVER.md](./LAPTOP_SERVER.md).
 
 ```bash
 $ npm install

@@ -1,4 +1,5 @@
 import {
+  ArrayMaxSize,
   IsArray,
   IsDateString,
   IsEnum,
@@ -35,6 +36,11 @@ export class UpdateTransactionDto {
   @IsOptional()
   @IsString()
   receipt_image?: string | null;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  receipt_items?: unknown[] | null;
 
   @IsOptional()
   @IsDateString()

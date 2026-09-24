@@ -13,6 +13,7 @@
   UploadedFile,
   Query,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { UsersService } from './users.service';
@@ -53,6 +54,7 @@ const userAvatarUploadDir = join(process.cwd(), 'uploads', 'avatars');
 
 @Controller('users')
 export class UsersController {
+  private readonly logger = new Logger(UsersController.name);
   constructor(
     private usersService: UsersService,
     private prisma: PrismaService,
@@ -77,6 +79,20 @@ export class UsersController {
         action,
       },
     });
+  }
+
+  private async logUserAction(userId: number, action: string) {
+    try {
+      await this.prisma.admin_logs.create({
+        data: { admin_id: userId, action },
+      });
+    } catch {
+      // The account change has already committed. Do not report it as failed
+      // and prompt a second password change, registration or avatar upload.
+      this.logger.warn(
+        'Account action succeeded, but its activity log could not be written.',
+      );
+    }
   }
 
   @Post('login')
@@ -115,12 +131,10 @@ export class UsersController {
       body.refreshToken,
     );
 
-    await this.prisma.admin_logs.create({
-      data: {
-        admin_id: req.user.userId,
-        action: `Người dùng đăng xuất hệ thống (id: ${req.user.userId})`,
-      },
-    });
+    await this.logUserAction(
+      req.user.userId,
+      `Người dùng đăng xuất hệ thống (id: ${req.user.userId})`,
+    );
 
     return result;
   }
@@ -139,27 +153,10 @@ export class UsersController {
   ) {
     const user = await this.usersService.updateProfile(req.user.userId, dto);
 
-    await this.prisma.admin_logs.create({
-      data: {
-        admin_id: req.user.userId,
-        action: `Cập nhật hồ sơ người dùng (id: ${req.user.userId})`,
-      },
-    });
-
-    return user;
-  }
-
-  @UseGuards(JwtGuard)
-  @Put('me/upgrade-premium')
-  async upgradeSelfToPremium(@Req() req: AuthenticatedRequest) {
-    const user = await this.usersService.upgradeSelfToPremium(req.user.userId);
-
-    await this.prisma.admin_logs.create({
-      data: {
-        admin_id: req.user.userId,
-        action: `Người dùng nâng cấp Premium (id: ${req.user.userId})`,
-      },
-    });
+    await this.logUserAction(
+      req.user.userId,
+      `Cập nhật hồ sơ người dùng (id: ${req.user.userId})`,
+    );
 
     return user;
   }
@@ -195,12 +192,10 @@ export class UsersController {
       throw error;
     }
 
-    await this.prisma.admin_logs.create({
-      data: {
-        admin_id: req.user.userId,
-        action: `Upload avatar người dùng (id: ${req.user.userId})`,
-      },
-    });
+    await this.logUserAction(
+      req.user.userId,
+      `Upload avatar người dùng (id: ${req.user.userId})`,
+    );
 
     return user;
   }
@@ -210,12 +205,10 @@ export class UsersController {
   async deactivateMe(@Req() req: AuthenticatedRequest) {
     const user = await this.usersService.deactivateSelf(req.user.userId);
 
-    await this.prisma.admin_logs.create({
-      data: {
-        admin_id: req.user.userId,
-        action: `Người dùng tự vô hiệu hóa tài khoản (${this.getUserLogLabel(user)})`,
-      },
-    });
+    await this.logUserAction(
+      req.user.userId,
+      `Người dùng tự vô hiệu hóa tài khoản (${this.getUserLogLabel(user)})`,
+    );
 
     return {
       message: 'Tài khoản đã được vô hiệu hóa',
@@ -270,12 +263,10 @@ export class UsersController {
   ) {
     const result = await this.usersService.changePassword(req.user.userId, dto);
 
-    await this.prisma.admin_logs.create({
-      data: {
-        admin_id: req.user.userId,
-        action: `Người dùng đổi mật khẩu (id: ${req.user.userId})`,
-      },
-    });
+    await this.logUserAction(
+      req.user.userId,
+      `Người dùng đổi mật khẩu (id: ${req.user.userId})`,
+    );
 
     return result;
   }
@@ -291,12 +282,10 @@ export class UsersController {
       dto,
     );
 
-    await this.prisma.admin_logs.create({
-      data: {
-        admin_id: req.user.userId,
-        action: `Người dùng tạo mật khẩu mới lần đầu (id: ${req.user.userId})`,
-      },
-    });
+    await this.logUserAction(
+      req.user.userId,
+      `Người dùng tạo mật khẩu mới lần đầu (id: ${req.user.userId})`,
+    );
 
     return result;
   }
@@ -324,12 +313,10 @@ export class UsersController {
   async create(@Body() dto: CreateUserDto) {
     const user = await this.usersService.create(dto);
 
-    await this.prisma.admin_logs.create({
-      data: {
-        admin_id: user.id,
-        action: `Tạo người dùng (${this.getUserLogLabel(user)})`,
-      },
-    });
+    await this.logUserAction(
+      user.id,
+      `Tạo người dùng (${this.getUserLogLabel(user)})`,
+    );
 
     return user;
   }

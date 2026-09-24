@@ -1,6 +1,9 @@
+import { normalizeTagName } from '../common/normalize-tag';
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, categories, transactions } from '@prisma/client';
@@ -10,6 +13,7 @@ import { join, normalize } from 'path';
 import { CurrencyService } from '../currency/currency.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { isSavingTransferCategory } from '../common/finance/cash-flow-classification';
 import {
   CreateTransactionDto,
   TransactionType,
@@ -34,6 +38,7 @@ type OwnedWallet = {
   id: number;
   user_id: number | null;
   currency: string;
+  wallet_type: string;
 };
 
 type TransactionQuery = {
@@ -52,6 +57,7 @@ type TransactionQuery = {
 
 @Injectable()
 export class TransactionsService {
+  private readonly logger = new Logger(TransactionsService.name);
   private readonly receiptUploadDir = normalize(
     join(process.cwd(), 'uploads', 'receipts'),
   );
@@ -61,6 +67,52 @@ export class TransactionsService {
     private currencyService: CurrencyService,
     private notificationsService: NotificationsService,
   ) {}
+
+  private async notifyBudgetAfterCommit(userId: number, walletId: number) {
+    try {
+      await this.notificationsService.createBudgetAlertsForWallet(
+        userId,
+        walletId,
+      );
+    } catch {
+      // The financial transaction is already committed. A notification failure
+      // must not make the client retry it as though the save had failed.
+      this.logger.warn(
+        'Transaction saved, but budget notification generation failed.',
+      );
+    }
+  }
+
+  private async lockUnchangedTransaction(
+    tx: Prisma.TransactionClient,
+    expected: transactions,
+  ) {
+    const rows = await tx.$queryRaw<
+      Array<{
+        id: number;
+        wallet_id: number | null;
+        category_id: number | null;
+        amount: Prisma.Decimal;
+      }>
+    >`
+      SELECT id, wallet_id, category_id, amount FROM transactions
+      WHERE id = ${expected.id} FOR UPDATE
+    `;
+    const latest = rows[0];
+    if (!latest)
+      throw new NotFoundException(
+        'Giao dịch đã bị xóa. Vui lòng tải lại danh sách.',
+      );
+    if (
+      latest.wallet_id !== expected.wallet_id ||
+      latest.category_id !== expected.category_id ||
+      !new Prisma.Decimal(latest.amount).equals(expected.amount)
+    ) {
+      throw new ConflictException(
+        'Giao dịch vừa được thay đổi. Vui lòng tải lại trước khi sửa hoặc xóa.',
+      );
+    }
+  }
 
   private readonly transactionSelect = {
     id: true,
@@ -73,6 +125,7 @@ export class TransactionsService {
     exchange_rate_used: true,
     note: true,
     receipt_image: true,
+    receipt_items: true,
     transaction_date: true,
     created_at: true,
   } as const;
@@ -84,11 +137,52 @@ export class TransactionsService {
   private toPositiveDecimal(value: string) {
     const decimal = this.toDecimal(value);
 
-    if (decimal.lessThanOrEqualTo(0)) {
+    if (!decimal.isFinite() || decimal.lessThanOrEqualTo(0)) {
       throw new BadRequestException('Số tiền giao dịch phải lớn hơn 0');
     }
 
     return decimal;
+  }
+
+  private async adjustWalletBalance(
+    tx: Prisma.TransactionClient,
+    userId: number,
+    wallet: { id: number; currency: string },
+    delta: Prisma.Decimal,
+  ) {
+    const changed = await tx.wallets.updateMany({
+      where: {
+        id: wallet.id,
+        user_id: userId,
+        currency: wallet.currency,
+        deleted_at: null,
+        OR: [{ is_active: true }, { is_active: null }],
+      },
+      data: { balance: { increment: delta } },
+    });
+    if (changed.count !== 1) {
+      throw new ConflictException(
+        'Ví vừa thay đổi hoặc không còn hoạt động. Vui lòng tải lại trước khi lưu.',
+      );
+    }
+  }
+
+  private async assertNotLoanManaged(transactionId: number) {
+    const [opening, payment] = await Promise.all([
+      this.prisma.loan_debts.findFirst({
+        where: { opening_transaction_id: transactionId, deleted_at: null },
+        select: { id: true },
+      }),
+      this.prisma.loan_debt_payments.findFirst({
+        where: { transaction_id: transactionId, deleted_at: null },
+        select: { id: true },
+      }),
+    ]);
+    if (opening || payment) {
+      throw new BadRequestException(
+        'Giao dịch này thuộc khoản vay/nợ. Vui lòng chỉnh sửa hoặc xóa trong mục Vay và nợ để cập nhật đúng số tiền còn lại.',
+      );
+    }
   }
 
   private parseDateFilter(value: string, endOfDay = false) {
@@ -101,15 +195,17 @@ export class TransactionsService {
     // A transaction date is a calendar date, not a local timestamp. Build its
     // canonical representation at UTC midnight so the host timezone cannot
     // move YYYY-MM-DD to the previous day when Nest serializes it as JSON.
-    const date = new Date(Date.UTC(
-      Number(match[1]),
-      Number(match[2]) - 1,
-      Number(match[3]),
-      endOfDay ? 23 : 0,
-      endOfDay ? 59 : 0,
-      endOfDay ? 59 : 0,
-      endOfDay ? 999 : 0,
-    ));
+    const date = new Date(
+      Date.UTC(
+        Number(match[1]),
+        Number(match[2]) - 1,
+        Number(match[3]),
+        endOfDay ? 23 : 0,
+        endOfDay ? 59 : 0,
+        endOfDay ? 59 : 0,
+        endOfDay ? 999 : 0,
+      ),
+    );
 
     if (
       Number.isNaN(date.getTime()) ||
@@ -146,11 +242,48 @@ export class TransactionsService {
     return [
       ...new Set(
         tags
-          .map((tag) => tag.trim().replace(/^#+/, '').toLowerCase())
+          .map(normalizeTagName)
           .filter((tag) => tag.length > 0)
           .map((tag) => tag.slice(0, 50)),
       ),
     ].slice(0, 8);
+  }
+
+  private normalizeReceiptItems(
+    items: unknown[] | null | undefined,
+  ): Prisma.InputJsonValue | Prisma.NullTypes.DbNull | undefined {
+    if (items === undefined) return undefined;
+    if (items === null) return Prisma.DbNull;
+    if (items.length > 100) {
+      throw new BadRequestException('Hóa đơn chỉ hỗ trợ tối đa 100 món');
+    }
+
+    return items.map((item, index) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        throw new BadRequestException(
+          `Món thứ ${index + 1} trong hóa đơn chưa hợp lệ`,
+        );
+      }
+      const record = item as Record<string, unknown>;
+      const name = typeof record.name === 'string' ? record.name.trim() : '';
+      const amount =
+        typeof record.amount === 'number'
+          ? record.amount
+          : typeof record.amount === 'string' && record.amount.trim()
+            ? Number(record.amount)
+            : Number.NaN;
+
+      if (!name || name.length > 200) {
+        throw new BadRequestException(
+          `Tên món thứ ${index + 1} phải có từ 1 đến 200 ký tự`,
+        );
+      }
+      if (!Number.isFinite(amount) || Math.abs(amount) > 999_999_999_999.99) {
+        throw new BadRequestException(`Số tiền món “${name}” chưa hợp lệ`);
+      }
+
+      return { name, amount: Math.round(amount * 100) / 100 };
+    });
   }
 
   private async deleteReceiptFile(filename?: string | null) {
@@ -350,7 +483,7 @@ export class TransactionsService {
 
   private async getOwnedWallet(userId: number, walletId: number) {
     const wallets = await this.prisma.$queryRaw<OwnedWallet[]>`
-      SELECT id, user_id, currency
+      SELECT id, user_id, currency, wallet_type
       FROM wallets
       WHERE id = ${walletId} AND user_id = ${userId}
         AND COALESCE(is_active, 1) = 1
@@ -362,12 +495,18 @@ export class TransactionsService {
       throw new NotFoundException('Không tìm thấy ví');
     }
 
+    if (wallet.wallet_type === 'SAVINGS') {
+      throw new BadRequestException(
+        'Hãy đóng góp hoặc rút tiền trong mục tiêu tiết kiệm',
+      );
+    }
+
     return wallet satisfies OwnedWallet;
   }
 
   private async getOwnedWalletForRead(userId: number, walletId: number) {
     const wallets = await this.prisma.$queryRaw<OwnedWallet[]>`
-      SELECT id, user_id, currency
+      SELECT id, user_id, currency, wallet_type
       FROM wallets
       WHERE id = ${walletId} AND user_id = ${userId}
       LIMIT 1
@@ -478,6 +617,11 @@ export class TransactionsService {
   ) {
     if (categoryId) {
       const category = await this.getAccessibleCategory(userId, categoryId);
+      if (isSavingTransferCategory(category)) {
+        throw new BadRequestException(
+          'Danh mục Tiết kiệm đã được thay bằng chức năng Mục tiêu tiết kiệm',
+        );
+      }
       return category.type as TransactionType;
     }
 
@@ -526,7 +670,7 @@ export class TransactionsService {
 
     if (query.cashFlow === 'normal') {
       const normalCategories = await this.prisma.categories.findMany({
-        where: { cash_flow_group: { not: 'LOAN_DEBT' } },
+        where: { cash_flow_group: 'NORMAL' },
         select: { id: true },
       });
       const normalCategoryIds = normalCategories.map((category) => category.id);
@@ -559,14 +703,27 @@ export class TransactionsService {
       };
     }
 
-    const noteKeyword = (query.note ?? query.q)?.trim();
-
-    if (noteKeyword) {
-      where.note = { contains: noteKeyword };
+    const noteKeywords = [
+      ...new Set(
+        [query.q, query.note]
+          .map((value) => value?.trim())
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ];
+    if (noteKeywords.length) {
+      const existingAnd = where.AND
+        ? Array.isArray(where.AND)
+          ? where.AND
+          : [where.AND]
+        : [];
+      where.AND = [
+        ...existingAnd,
+        ...noteKeywords.map((keyword) => ({ note: { contains: keyword } })),
+      ];
     }
 
     if (query.tag?.trim()) {
-      const normalizedTag = query.tag.trim().replace(/^#+/, '').toLowerCase();
+      const normalizedTag = normalizeTagName(query.tag);
       const taggedRows = await this.prisma.$queryRaw<
         Array<{ transaction_id: number }>
       >`
@@ -574,7 +731,7 @@ export class TransactionsService {
         FROM transaction_tags tt
         INNER JOIN tags t ON t.id = tt.tag_id
         WHERE t.user_id = ${userId}
-          AND t.name LIKE ${`%${normalizedTag}%`}
+          AND LOCATE(${normalizedTag}, t.name) > 0
       `;
       const transactionIds = taggedRows.map((row) => row.transaction_id);
 
@@ -653,6 +810,7 @@ export class TransactionsService {
       wallet.currency,
       targetCurrency,
     );
+    const receiptItems = this.normalizeReceiptItems(dto.receipt_items);
 
     const created = await this.prisma.$transaction(async (tx) => {
       const transaction = await tx.transactions.create({
@@ -663,6 +821,7 @@ export class TransactionsService {
           ...conversionSnapshot,
           note: dto.note,
           receipt_image: dto.receipt_image,
+          receipt_items: receiptItems,
           transaction_date: dto.transaction_date
             ? this.parseTransactionDate(dto.transaction_date)
             : new Date(),
@@ -670,14 +829,7 @@ export class TransactionsService {
         select: this.transactionSelect,
       });
 
-      await tx.wallets.update({
-        where: { id: dto.wallet_id },
-        data: {
-          balance: {
-            increment: signedAmount,
-          },
-        },
-      });
+      await this.adjustWalletBalance(tx, userId, wallet, signedAmount);
 
       await this.syncTags(tx, userId, transaction.id, dto.tags);
 
@@ -685,10 +837,7 @@ export class TransactionsService {
     });
 
     if (type === TransactionType.EXPENSE) {
-      await this.notificationsService.createBudgetAlertsForWallet(
-        userId,
-        dto.wallet_id,
-      );
+      await this.notifyBudgetAfterCommit(userId, dto.wallet_id);
     }
 
     const walletCurrencyMap = new Map([[wallet.id, wallet.currency]]);
@@ -712,6 +861,7 @@ export class TransactionsService {
     }
 
     const currentWallet = await this.getOwnedWallet(userId, current.wallet_id);
+    await this.assertNotLoanManaged(id);
     const nextWalletId = dto.wallet_id ?? current.wallet_id;
     const nextWallet = await this.getOwnedWallet(userId, nextWalletId);
 
@@ -747,35 +897,30 @@ export class TransactionsService {
           await this.getActorCurrency(userId),
         )
       : null;
+    const receiptItems = this.normalizeReceiptItems(dto.receipt_items);
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      await this.lockUnchangedTransaction(tx, current);
       if (current.wallet_id === nextWalletId) {
-        await tx.wallets.update({
-          where: { id: current.wallet_id },
-          data: {
-            balance: {
-              increment: nextSignedAmount.minus(currentSignedAmount),
-            },
-          },
-        });
+        await this.adjustWalletBalance(
+          tx,
+          userId,
+          currentWallet,
+          nextSignedAmount.minus(currentSignedAmount),
+        );
       } else {
-        await tx.wallets.update({
-          where: { id: current.wallet_id as number },
-          data: {
-            balance: {
-              decrement: currentSignedAmount,
-            },
-          },
-        });
-
-        await tx.wallets.update({
-          where: { id: nextWalletId },
-          data: {
-            balance: {
-              increment: nextSignedAmount,
-            },
-          },
-        });
+        await this.adjustWalletBalance(
+          tx,
+          userId,
+          currentWallet,
+          currentSignedAmount.negated(),
+        );
+        await this.adjustWalletBalance(
+          tx,
+          userId,
+          nextWallet,
+          nextSignedAmount,
+        );
       }
 
       const transaction = await tx.transactions.update({
@@ -795,6 +940,7 @@ export class TransactionsService {
           )
             ? (dto.receipt_image ?? null)
             : undefined,
+          receipt_items: receiptItems,
           transaction_date: dto.transaction_date
             ? this.parseTransactionDate(dto.transaction_date)
             : undefined,
@@ -821,10 +967,7 @@ export class TransactionsService {
       }
 
       for (const walletId of walletIdsToCheck) {
-        await this.notificationsService.createBudgetAlertsForWallet(
-          userId,
-          walletId,
-        );
+        await this.notifyBudgetAfterCommit(userId, walletId);
       }
     }
 
@@ -858,19 +1001,19 @@ export class TransactionsService {
 
     const wallet = await this.getOwnedWallet(userId, current.wallet_id);
 
+    await this.assertNotLoanManaged(id);
     const deleted = await this.prisma.$transaction(async (tx) => {
+      await this.lockUnchangedTransaction(tx, current);
       await tx.transaction_tags.deleteMany({
         where: { transaction_id: id },
       });
 
-      await tx.wallets.update({
-        where: { id: current.wallet_id as number },
-        data: {
-          balance: {
-            decrement: current.amount,
-          },
-        },
-      });
+      await this.adjustWalletBalance(
+        tx,
+        userId,
+        wallet,
+        new Prisma.Decimal(current.amount).negated(),
+      );
 
       return tx.transactions.delete({
         where: { id },

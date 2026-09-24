@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return */
 import { AdminService } from './admin.service';
 
 type DashboardCategoryMeta = {
@@ -28,7 +27,7 @@ type DashboardTransactionSummary = {
   walletTotals: Array<{ walletId: number; total: number }>;
 };
 
-type AdminServiceTestAccess = AdminService & {
+type AdminServiceTestAccess = {
   summarizeTransactions(
     transactions: DashboardTransaction[],
     categoryMeta?: Map<number, DashboardCategoryMeta>,
@@ -131,7 +130,7 @@ describe('AdminService statistics', () => {
     const service = new AdminService(
       {} as never,
       {} as never,
-    ) as AdminServiceTestAccess;
+    ) as unknown as AdminServiceTestAccess;
     const summary = service.summarizeTransactions(
       [
         {

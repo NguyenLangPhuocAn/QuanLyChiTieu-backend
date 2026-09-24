@@ -14,7 +14,9 @@ const createPrismaMock = () => {
     },
     transactions: {
       create: jest.fn(),
+      count: jest.fn().mockResolvedValue(0),
     },
+    wallet_transfers: { count: jest.fn().mockResolvedValue(0) },
     wallets: {
       update: jest.fn(),
     },
@@ -43,6 +45,82 @@ const createPrismaMock = () => {
 };
 
 describe('WalletsService', () => {
+  it.each(['balance', 'transfer', 'archived'] as const)(
+    'rejects a wallet update when %s makes the requested change unsafe',
+    async (scenario) => {
+      const prisma = createPrismaMock();
+      const service = new WalletsService(
+        prisma as unknown as PrismaService,
+        { normalizeCurrency: (value: string) => value } as CurrencyService,
+      );
+      const wallet = {
+        id: 3,
+        user_id: 7,
+        name: 'Ví',
+        wallet_type: 'CASH',
+        currency: 'VND',
+        balance: new Prisma.Decimal(10),
+        is_active: true,
+        deleted_at: null,
+      };
+      prisma.$queryRaw.mockResolvedValue([wallet]);
+      prisma.users.findUnique.mockResolvedValue({
+        id: 7,
+        currency_default: 'VND',
+      });
+      prisma.tx.$queryRaw.mockResolvedValue([
+        {
+          ...wallet,
+          balance: new Prisma.Decimal(scenario === 'balance' ? 15 : 10),
+          is_active: scenario !== 'archived',
+        },
+      ]);
+      prisma.tx.wallet_transfers.count.mockResolvedValue(
+        scenario === 'transfer' ? 1 : 0,
+      );
+      await expect(
+        service.update(
+          7,
+          3,
+          scenario === 'transfer' ? { currency: 'USD' } : { balance: '20' },
+        ),
+      ).rejects.toThrow(
+        scenario === 'balance'
+          ? 'vừa thay đổi'
+          : scenario === 'transfer'
+            ? 'chuyển tiền'
+            : 'Không tìm thấy ví',
+      );
+      expect(prisma.tx.$executeRaw).not.toHaveBeenCalled();
+      expect(prisma.tx.transactions.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not expose goal-managed savings wallets in the regular wallet list', async () => {
+    const prisma = createPrismaMock();
+    const currencyService = {
+      normalizeCurrency: jest.fn((value?: string | null) => value ?? 'VND'),
+      convertAmount: jest.fn(),
+    };
+    const service = new WalletsService(
+      prisma as unknown as PrismaService,
+      currencyService as unknown as CurrencyService,
+    );
+
+    prisma.users.findUnique.mockResolvedValue({
+      id: 7,
+      role: 'PREMIUM',
+      currency_default: 'VND',
+    });
+    prisma.$queryRaw.mockResolvedValue([]);
+
+    await service.findAll(7);
+
+    const queryCalls = prisma.$queryRaw.mock.calls as unknown[][];
+    const queryParts = queryCalls[0]?.[0] as string[];
+    expect(queryParts.join('')).toContain("wallet_type <> 'SAVINGS'");
+  });
+
   it('stores a currency snapshot for balance adjustment transactions', async () => {
     const prisma = createPrismaMock();
     const currencyService = {
@@ -83,6 +161,7 @@ describe('WalletsService', () => {
       currency_default: 'VND',
     });
     prisma.tx.categories.findFirst.mockResolvedValue({ id: 9 });
+    prisma.tx.$queryRaw.mockResolvedValue([existingWallet]);
 
     await service.update(7, 3, { balance: '20' });
 

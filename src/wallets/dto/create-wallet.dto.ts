@@ -8,7 +8,7 @@
 } from 'class-validator';
 import { SUPPORTED_CURRENCIES } from '../../currency/currency.constants';
 
-export const WALLET_TYPES = ['CASH', 'BANK', 'E_WALLET'] as const;
+export const WALLET_TYPES = ['CASH', 'BANK', 'E_WALLET', 'SAVINGS'] as const;
 export type WalletType = (typeof WALLET_TYPES)[number];
 
 export class CreateWalletDto {

@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { Prisma, categories_type } from '@prisma/client';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
-import { isLoanDebtCategory } from '../common/finance/cash-flow-classification';
+import { isNormalCashFlow } from '../common/finance/cash-flow-classification';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   BudgetPeriod,
@@ -474,9 +474,9 @@ export class BudgetsService {
       );
     }
 
-    if (isLoanDebtCategory(category)) {
+    if (!isNormalCashFlow(category)) {
       throw new BadRequestException(
-        'Không thể lập ngân sách chi tiêu cho danh mục vay/nợ',
+        'Không thể lập ngân sách chi tiêu cho danh mục vay/nợ hoặc tiết kiệm',
       );
     }
 
@@ -687,7 +687,7 @@ export class BudgetsService {
               AND t.transaction_date >= ${row.start_date}
               AND t.transaction_date <= ${row.end_date}
               AND NOT (
-                COALESCE(c.cash_flow_group, '') = 'LOAN_DEBT'
+                COALESCE(c.cash_flow_group, 'NORMAL') <> 'NORMAL'
                 OR
                 LOWER(COALESCE(c.icon, '')) LIKE '%loan%'
                 OR LOWER(COALESCE(c.icon, '')) LIKE '%debt%'
@@ -709,7 +709,7 @@ export class BudgetsService {
               AND t.transaction_date >= ${row.start_date}
               AND t.transaction_date <= ${row.end_date}
               AND NOT (
-                COALESCE(c.cash_flow_group, '') = 'LOAN_DEBT'
+                COALESCE(c.cash_flow_group, 'NORMAL') <> 'NORMAL'
                 OR
                 LOWER(COALESCE(c.icon, '')) LIKE '%loan%'
                 OR LOWER(COALESCE(c.icon, '')) LIKE '%debt%'
@@ -1103,7 +1103,7 @@ export class BudgetsService {
         AND t.transaction_date <= ${budget.end_date}
         AND (${isCategoryBudget} = FALSE OR t.category_id = ${categoryId})
         AND NOT (
-          COALESCE(c.cash_flow_group, '') = 'LOAN_DEBT'
+          COALESCE(c.cash_flow_group, 'NORMAL') <> 'NORMAL'
           OR LOWER(COALESCE(c.icon, '')) LIKE '%loan%'
           OR LOWER(COALESCE(c.icon, '')) LIKE '%debt%'
           OR LOWER(COALESCE(c.name, '')) LIKE '%loan%'

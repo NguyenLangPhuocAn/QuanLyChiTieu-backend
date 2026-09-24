@@ -24,4 +24,20 @@ export class NotificationsScheduler {
       );
     }
   }
+
+  @Cron('5 8 * * *')
+  async createFinancialPlanNotifications() {
+    try {
+      const result =
+        await this.notificationsService.createFinancialPlanNotifications();
+      this.logger.log(
+        `Financial plan notifications scanned=${result.scannedCount} created=${result.createdCount}`,
+      );
+    } catch (error) {
+      this.logger.error(
+        'Failed to create financial plan notifications',
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
+  }
 }

@@ -59,3 +59,9 @@ node_modules
 .env
 dist
 uploads
+
+# Local account fixtures contain personal addresses and demo credentials.
+/scripts/create-presentation-account.js
+*.tsbuildinfo
+.env.*
+!.env.example

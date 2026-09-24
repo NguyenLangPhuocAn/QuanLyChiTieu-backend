@@ -1,9 +1,15 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { loan_debt_status, loan_debt_type, Prisma } from '@prisma/client';
+import {
+  loan_debt_status,
+  loan_debt_type,
+  Prisma,
+  type loan_debts,
+} from '@prisma/client';
 import { CurrencyService } from '../currency/currency.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateLoanDebtDto, LoanDebtType } from './dto/create-loan-debt.dto';
@@ -25,7 +31,7 @@ export class LoanDebtsService {
   private positiveAmount(value: string) {
     try {
       const amount = new Prisma.Decimal(value);
-      if (amount.lessThanOrEqualTo(0)) throw new Error();
+      if (!amount.isFinite() || amount.lessThanOrEqualTo(0)) throw new Error();
       return amount;
     } catch {
       throw new BadRequestException('Số tiền phải lớn hơn 0');
@@ -34,14 +40,18 @@ export class LoanDebtsService {
 
   private parseDate(value?: string | null) {
     if (!value) return null;
-    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+    const match = /^(\d{4})-(\d{2})-(\d{2})(?:T.*)?$/.exec(value);
     if (!match) throw new BadRequestException('Ngày không hợp lệ');
-    const date = new Date(
-      Number(match[1]),
-      Number(match[2]) - 1,
-      Number(match[3]),
-    );
-    if (Number.isNaN(date.getTime())) {
+    const year = Number(match[1]);
+    const month = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const date = new Date(Date.UTC(year, month, day));
+    if (
+      Number.isNaN(date.getTime()) ||
+      date.getUTCFullYear() !== year ||
+      date.getUTCMonth() !== month ||
+      date.getUTCDate() !== day
+    ) {
       throw new BadRequestException('Ngày không hợp lệ');
     }
     return date;
@@ -57,6 +67,11 @@ export class LoanDebtsService {
       },
     });
     if (!wallet) throw new NotFoundException('Không tìm thấy ví');
+    if (wallet.wallet_type === 'SAVINGS') {
+      throw new BadRequestException(
+        'Hãy rút tiền về ví thông thường trước khi sử dụng cho khoản vay/nợ.',
+      );
+    }
     return wallet;
   }
 
@@ -69,6 +84,35 @@ export class LoanDebtsService {
     return payment
       ? { name: 'Thu hồi nợ', type: 'INCOME' as const }
       : { name: 'Cho vay', type: 'EXPENSE' as const };
+  }
+
+  private async adjustBalance(
+    tx: Prisma.TransactionClient,
+    userId: number,
+    walletId: number,
+    currency: string,
+    amount: Prisma.Decimal,
+    reversal = false,
+  ) {
+    const changed = await tx.wallets.updateMany({
+      where: {
+        id: walletId,
+        user_id: userId,
+        currency,
+        ...(reversal
+          ? {}
+          : {
+              wallet_type: { not: 'SAVINGS' as const },
+              deleted_at: null,
+              OR: [{ is_active: true }, { is_active: null }],
+            }),
+      },
+      data: { balance: { increment: amount } },
+    });
+    if (changed.count !== 1)
+      throw new ConflictException(
+        'Ví vừa thay đổi hoặc không còn sử dụng được. Vui lòng tải lại.',
+      );
   }
 
   private async ensureCategory(
@@ -234,10 +278,7 @@ export class LoanDebtsService {
           transaction_date: this.parseDate(dto.transaction_date) ?? new Date(),
         },
       });
-      await tx.wallets.update({
-        where: { id: wallet.id },
-        data: { balance: { increment: signed } },
-      });
+      await this.adjustBalance(tx, userId, wallet.id, wallet.currency, signed);
       const record = await tx.loan_debts.create({
         data: {
           user_id: userId,
@@ -265,8 +306,36 @@ export class LoanDebtsService {
     return record;
   }
 
-  private async settledAmount(id: number) {
-    const result = await this.prisma.loan_debt_payments.aggregate({
+  private async lockRecord(
+    tx: Prisma.TransactionClient,
+    userId: number,
+    id: number,
+    expected?: loan_debts,
+  ) {
+    const rows = await tx.$queryRaw<loan_debts[]>`
+      SELECT * FROM loan_debts WHERE id = ${id} AND user_id = ${userId} AND deleted_at IS NULL FOR UPDATE
+    `;
+    const current = rows[0];
+    if (!current) throw new NotFoundException('Không tìm thấy khoản vay/nợ');
+    if (
+      expected &&
+      (!current.principal_amount.equals(expected.principal_amount) ||
+        current.opening_wallet_id !== expected.opening_wallet_id ||
+        current.currency !== expected.currency ||
+        current.type !== expected.type)
+    ) {
+      throw new ConflictException(
+        'Khoản vay/nợ vừa thay đổi. Vui lòng tải lại trước khi tiếp tục.',
+      );
+    }
+    return current;
+  }
+
+  private async settledAmount(
+    id: number,
+    client: PrismaService | Prisma.TransactionClient = this.prisma,
+  ) {
+    const result = await client.loan_debt_payments.aggregate({
       where: { loan_debt_id: id, deleted_at: null },
       _sum: { amount: true },
     });
@@ -296,9 +365,21 @@ export class LoanDebtsService {
       signed,
       wallet.currency,
     );
-    const nextStatus = amount.equals(remaining) ? 'PAID' : 'OPEN';
 
     await this.prisma.$transaction(async (tx) => {
+      const locked = await this.lockRecord(tx, userId, id, record);
+      const latestRemaining = locked.principal_amount.minus(
+        await this.settledAmount(id, tx),
+      );
+      if (latestRemaining.lessThanOrEqualTo(0) || locked.status === 'PAID') {
+        throw new BadRequestException('Khoản vay/nợ đã được thanh toán');
+      }
+      if (amount.greaterThan(latestRemaining)) {
+        throw new BadRequestException(
+          'Số tiền vượt quá khoản còn lại. Vui lòng tải lại lịch sử thanh toán.',
+        );
+      }
+      const nextStatus = amount.equals(latestRemaining) ? 'PAID' : 'OPEN';
       const category = await this.ensureCategory(
         tx,
         record.type as LoanDebtType,
@@ -312,14 +393,11 @@ export class LoanDebtsService {
           ...snapshot,
           note:
             dto.note ??
-            `${this.categoryMeta(record.type as LoanDebtType, true).name}: ${record.person_name}`,
+            `${this.categoryMeta(record.type as LoanDebtType, true).name}: ${locked.person_name}`,
           transaction_date: this.parseDate(dto.payment_date) ?? new Date(),
         },
       });
-      await tx.wallets.update({
-        where: { id: wallet.id },
-        data: { balance: { increment: signed } },
-      });
+      await this.adjustBalance(tx, userId, wallet.id, wallet.currency, signed);
       await tx.loan_debt_payments.create({
         data: {
           loan_debt_id: id,
@@ -344,12 +422,6 @@ export class LoanDebtsService {
     const nextPersonName = dto.person_name?.trim();
     const personNameChanged =
       nextPersonName !== undefined && nextPersonName !== record.person_name;
-    const paymentsWithGeneratedNotes = personNameChanged
-      ? await this.prisma.loan_debt_payments.findMany({
-          where: { loan_debt_id: id, deleted_at: null, note: null },
-          select: { transaction_id: true },
-        })
-      : [];
     const locksOpening = settled.greaterThan(0);
     if (locksOpening && (dto.principal_amount || dto.wallet_id)) {
       throw new BadRequestException(
@@ -381,16 +453,38 @@ export class LoanDebtsService {
         : null;
 
     await this.prisma.$transaction(async (tx) => {
+      await this.lockRecord(tx, userId, id, record);
+      if (
+        (dto.principal_amount || dto.wallet_id) &&
+        (await this.settledAmount(id, tx)).greaterThan(0)
+      ) {
+        throw new BadRequestException(
+          'Không thể đổi số tiền hoặc ví sau khi đã có thanh toán',
+        );
+      }
+      const paymentsWithGeneratedNotes = personNameChanged
+        ? await tx.loan_debt_payments.findMany({
+            where: { loan_debt_id: id, deleted_at: null, note: null },
+            select: { transaction_id: true },
+          })
+        : [];
       const openingTransactionData: Prisma.transactionsUpdateInput = {};
       if (dto.principal_amount || dto.wallet_id) {
-        await tx.wallets.update({
-          where: { id: record.opening_wallet_id },
-          data: { balance: { decrement: oldSigned } },
-        });
-        await tx.wallets.update({
-          where: { id: nextWallet?.id ?? record.opening_wallet_id },
-          data: { balance: { increment: nextSigned } },
-        });
+        await this.adjustBalance(
+          tx,
+          userId,
+          record.opening_wallet_id,
+          record.currency,
+          oldSigned.negated(),
+          true,
+        );
+        await this.adjustBalance(
+          tx,
+          userId,
+          nextWallet?.id ?? record.opening_wallet_id,
+          record.currency,
+          nextSigned,
+        );
         Object.assign(openingTransactionData, {
           wallet_id: nextWallet?.id ?? record.opening_wallet_id,
           amount: nextSigned,
@@ -438,20 +532,26 @@ export class LoanDebtsService {
 
   async removePayment(userId: number, id: number, paymentId: number) {
     await this.rawRecord(userId, id);
-    const payment = await this.prisma.loan_debt_payments.findFirst({
-      where: { id: paymentId, loan_debt_id: id, deleted_at: null },
-    });
-    if (!payment) throw new NotFoundException('Không tìm thấy lần thanh toán');
-    const transaction = await this.prisma.transactions.findUnique({
-      where: { id: payment.transaction_id },
-    });
-    if (!transaction)
-      throw new NotFoundException('Không tìm thấy giao dịch liên kết');
     await this.prisma.$transaction(async (tx) => {
-      await tx.wallets.update({
-        where: { id: payment.wallet_id },
-        data: { balance: { decrement: transaction.amount } },
+      const record = await this.lockRecord(tx, userId, id);
+      const payment = await tx.loan_debt_payments.findFirst({
+        where: { id: paymentId, loan_debt_id: id, deleted_at: null },
       });
+      if (!payment)
+        throw new NotFoundException('Không tìm thấy lần thanh toán');
+      const transaction = await tx.transactions.findUnique({
+        where: { id: payment.transaction_id },
+      });
+      if (!transaction)
+        throw new NotFoundException('Không tìm thấy giao dịch liên kết');
+      await this.adjustBalance(
+        tx,
+        userId,
+        payment.wallet_id,
+        record.currency,
+        transaction.amount.negated(),
+        true,
+      );
       await tx.transactions.delete({ where: { id: transaction.id } });
       await tx.loan_debt_payments.update({
         where: { id: payment.id },
@@ -463,24 +563,28 @@ export class LoanDebtsService {
   }
 
   async remove(userId: number, id: number) {
-    const record = await this.rawRecord(userId, id);
-    const payments = await this.prisma.loan_debt_payments.findMany({
-      where: { loan_debt_id: id, deleted_at: null },
-    });
-    const transactionIds = [
-      record.opening_transaction_id,
-      ...payments.map((payment) => payment.transaction_id),
-    ];
-    const transactions = await this.prisma.transactions.findMany({
-      where: { id: { in: transactionIds } },
-    });
     await this.prisma.$transaction(async (tx) => {
+      const record = await this.lockRecord(tx, userId, id);
+      const payments = await tx.loan_debt_payments.findMany({
+        where: { loan_debt_id: id, deleted_at: null },
+      });
+      const transactionIds = [
+        record.opening_transaction_id,
+        ...payments.map((payment) => payment.transaction_id),
+      ];
+      const transactions = await tx.transactions.findMany({
+        where: { id: { in: transactionIds } },
+      });
       for (const transaction of transactions) {
         if (!transaction.wallet_id) continue;
-        await tx.wallets.update({
-          where: { id: transaction.wallet_id },
-          data: { balance: { decrement: transaction.amount } },
-        });
+        await this.adjustBalance(
+          tx,
+          userId,
+          transaction.wallet_id,
+          record.currency,
+          transaction.amount.negated(),
+          true,
+        );
       }
       await tx.transactions.deleteMany({
         where: { id: { in: transactionIds } },

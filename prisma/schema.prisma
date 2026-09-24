@@ -71,6 +71,7 @@ model transactions {
   exchange_rate_used Decimal?  @db.Decimal(18, 8)
   note               String?   @db.Text
   receipt_image      String?   @db.VarChar(255)
+  receipt_items      Json?
   transaction_date   DateTime  @db.DateTime(0)
   created_at         DateTime? @default(now()) @db.Timestamp(0)
 
@@ -123,9 +124,79 @@ model users {
   created_at                      DateTime?                 @default(now()) @db.Timestamp(0)
   budgets                         budgets[]
   loan_debts                      loan_debts[]
+  savings_goals                   savings_goals[]
+  wallet_transfers                wallet_transfers[]
+  payment_orders                  payment_orders[]
   notification_settings           notification_settings?
   notifications                   notifications[]
   notification_broadcasts_created notification_broadcasts[] @relation("notification_broadcasts_admin")
+  chatbot_conversations           chatbot_conversations[]
+  chatbot_messages                chatbot_messages[]
+  chatbot_suggestion_cache        chatbot_suggestion_cache?
+}
+
+model chatbot_conversations {
+  id         Int                @id @default(autoincrement())
+  user_id    Int
+  title      String             @db.VarChar(120)
+  created_at DateTime           @default(now()) @db.Timestamp(0)
+  updated_at DateTime           @default(now()) @updatedAt @db.Timestamp(0)
+  user       users              @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "chatbot_conversations_user_id_fkey")
+  messages   chatbot_messages[]
+
+  @@index([user_id, updated_at, id], map: "chatbot_conversations_user_updated_idx")
+}
+
+model chatbot_messages {
+  id                  Int                    @id @default(autoincrement())
+  user_id             Int
+  conversation_id     Int?
+  role                chatbot_message_role
+  content             String                 @db.Text
+  category_spending   Json?
+  context_window_days Int?
+  created_at          DateTime               @default(now()) @db.Timestamp(0)
+  user                users                  @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "chatbot_messages_user_id_fkey")
+  conversation        chatbot_conversations? @relation(fields: [conversation_id], references: [id], onDelete: Cascade, map: "chatbot_messages_conversation_id_fkey")
+
+  @@index([user_id, created_at, id], map: "chatbot_messages_user_history_idx")
+  @@index([conversation_id, created_at, id], map: "chatbot_messages_conversation_history_idx")
+}
+
+model chatbot_suggestion_cache {
+  user_id       Int      @id
+  suggestions   Json
+  generated_for DateTime @db.Date
+  created_at    DateTime @default(now()) @db.Timestamp(0)
+  updated_at    DateTime @default(now()) @updatedAt @db.Timestamp(0)
+  user          users    @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "chatbot_suggestion_cache_user_id_fkey")
+}
+
+model payment_orders {
+  id                     Int                  @id @default(autoincrement())
+  user_id                Int
+  order_code             String               @unique(map: "payment_orders_order_code_key") @db.VarChar(100)
+  provider               payment_provider     @default(VNPAY)
+  plan_code              String               @db.VarChar(50)
+  amount                 Decimal              @db.Decimal(15, 2)
+  currency               String               @default("VND") @db.VarChar(10)
+  status                 payment_order_status @default(PENDING)
+  payment_url            String?              @db.Text
+  vnp_transaction_no     String?              @unique(map: "payment_orders_vnp_transaction_no_key") @db.VarChar(50)
+  vnp_bank_code          String?              @db.VarChar(30)
+  vnp_bank_tran_no       String?              @db.VarChar(100)
+  vnp_card_type          String?              @db.VarChar(30)
+  vnp_response_code      String?              @db.VarChar(10)
+  vnp_transaction_status String?              @db.VarChar(10)
+  raw_response           String?              @db.Text
+  expires_at             DateTime             @db.DateTime(0)
+  paid_at                DateTime?            @db.DateTime(0)
+  created_at             DateTime?            @default(now()) @db.Timestamp(0)
+  updated_at             DateTime?            @default(now()) @updatedAt @db.Timestamp(0)
+  user                   users                @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "payment_orders_user_id_fkey")
+
+  @@index([user_id, status, created_at], map: "payment_orders_user_status_idx")
+  @@index([expires_at, status], map: "payment_orders_expiry_idx")
 }
 
 model refresh_tokens {
@@ -141,18 +212,77 @@ model refresh_tokens {
 }
 
 model wallets {
-  id          Int         @id @default(autoincrement())
-  user_id     Int?
-  name        String      @db.VarChar(50)
-  wallet_type wallet_type @default(CASH)
-  currency    String      @default("VND") @db.VarChar(10)
-  balance     Decimal?    @default(0.00) @db.Decimal(15, 2)
-  is_active   Boolean?    @default(true)
-  deleted_at  DateTime?   @db.DateTime(0)
-  created_at  DateTime?   @default(now()) @db.Timestamp(0)
-  budgets     budgets[]
+  id                 Int                @id @default(autoincrement())
+  user_id            Int?
+  name               String             @db.VarChar(50)
+  wallet_type        wallet_type        @default(CASH)
+  currency           String             @default("VND") @db.VarChar(10)
+  balance            Decimal?           @default(0.00) @db.Decimal(15, 2)
+  is_active          Boolean?           @default(true)
+  deleted_at         DateTime?          @db.DateTime(0)
+  created_at         DateTime?          @default(now()) @db.Timestamp(0)
+  budgets            budgets[]
+  savings_goal       savings_goals?
+  outgoing_transfers wallet_transfers[] @relation("wallet_transfer_source")
+  incoming_transfers wallet_transfers[] @relation("wallet_transfer_destination")
 
   @@index([user_id], map: "user_id")
+}
+
+model savings_goals {
+  id            Int                    @id @default(autoincrement())
+  user_id       Int
+  wallet_id     Int                    @unique(map: "savings_goals_wallet_id_key")
+  name          String                 @db.VarChar(100)
+  target_amount Decimal                @db.Decimal(15, 2)
+  target_date   DateTime?              @db.DateTime(0)
+  note          String?                @db.Text
+  status        savings_goal_status    @default(ACTIVE)
+  deleted_at    DateTime?              @db.DateTime(0)
+  created_at    DateTime?              @default(now()) @db.Timestamp(0)
+  updated_at    DateTime?              @default(now()) @updatedAt @db.Timestamp(0)
+  user          users                  @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "savings_goals_user_id_fkey")
+  wallet        wallets                @relation(fields: [wallet_id], references: [id], onDelete: Restrict, map: "savings_goals_wallet_id_fkey")
+  entries       savings_goal_entries[]
+
+  @@index([user_id, deleted_at, status], map: "savings_goals_user_state_idx")
+}
+
+model wallet_transfers {
+  id                    Int                   @id @default(autoincrement())
+  user_id               Int
+  source_wallet_id      Int
+  destination_wallet_id Int
+  amount                Decimal               @db.Decimal(15, 2)
+  currency              String                @db.VarChar(10)
+  transfer_date         DateTime              @db.DateTime(0)
+  note                  String?               @db.Text
+  deleted_at            DateTime?             @db.DateTime(0)
+  created_at            DateTime?             @default(now()) @db.Timestamp(0)
+  user                  users                 @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "wallet_transfers_user_id_fkey")
+  source_wallet         wallets               @relation("wallet_transfer_source", fields: [source_wallet_id], references: [id], onDelete: Restrict, map: "wallet_transfers_source_wallet_id_fkey")
+  destination_wallet    wallets               @relation("wallet_transfer_destination", fields: [destination_wallet_id], references: [id], onDelete: Restrict, map: "wallet_transfers_destination_wallet_id_fkey")
+  goal_entry            savings_goal_entries?
+
+  @@index([user_id, deleted_at, transfer_date], map: "wallet_transfers_user_history_idx")
+  @@index([source_wallet_id], map: "wallet_transfers_source_wallet_idx")
+  @@index([destination_wallet_id], map: "wallet_transfers_destination_wallet_idx")
+}
+
+model savings_goal_entries {
+  id          Int                     @id @default(autoincrement())
+  goal_id     Int
+  transfer_id Int?                    @unique(map: "savings_goal_entries_transfer_id_key")
+  type        savings_goal_entry_type
+  amount      Decimal                 @db.Decimal(15, 2)
+  entry_date  DateTime                @db.DateTime(0)
+  note        String?                 @db.Text
+  deleted_at  DateTime?               @db.DateTime(0)
+  created_at  DateTime?               @default(now()) @db.Timestamp(0)
+  goal        savings_goals           @relation(fields: [goal_id], references: [id], onDelete: Cascade, map: "savings_goal_entries_goal_id_fkey")
+  transfer    wallet_transfers?       @relation(fields: [transfer_id], references: [id], onDelete: SetNull, map: "savings_goal_entries_transfer_id_fkey")
+
+  @@index([goal_id, deleted_at, entry_date], map: "savings_goal_entries_history_idx")
 }
 
 model notifications {
@@ -193,7 +323,7 @@ model loan_debts {
   created_at             DateTime?            @default(now()) @db.Timestamp(0)
   updated_at             DateTime?            @default(now()) @updatedAt @db.Timestamp(0)
   payments               loan_debt_payments[]
-  user                   users                 @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "loan_debts_user_id_fkey")
+  user                   users                @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "loan_debts_user_id_fkey")
 
   @@unique([opening_transaction_id], map: "loan_debts_opening_transaction_key")
   @@index([user_id, deleted_at, status, due_date], map: "loan_debts_user_state_idx")
@@ -222,6 +352,8 @@ model notification_settings {
   user_id                      Int       @unique(map: "notification_settings_user_id_key")
   budget_alerts_enabled        Boolean?  @default(true)
   budget_expiring_enabled      Boolean?  @default(true)
+  cashflow_forecast_enabled    Boolean?  @default(true)
+  savings_plan_alerts_enabled  Boolean?  @default(true)
   system_notifications_enabled Boolean?  @default(true)
   created_at                   DateTime? @default(now()) @db.Timestamp(0)
   updated_at                   DateTime? @default(now()) @updatedAt @db.Timestamp(0)
@@ -266,6 +398,7 @@ enum categories_type {
 enum category_cash_flow_group {
   NORMAL
   LOAN_DEBT
+  SAVING_TRANSFER
 }
 
 enum loan_debt_type {
@@ -288,6 +421,31 @@ enum wallet_type {
   CASH
   BANK
   E_WALLET
+  SAVINGS
+}
+
+enum savings_goal_status {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum savings_goal_entry_type {
+  CONTRIBUTION
+  WITHDRAWAL
+  ADJUSTMENT
+}
+
+enum payment_provider {
+  VNPAY
+}
+
+enum payment_order_status {
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+  EXPIRED
 }
 
 enum budget_period {
@@ -315,4 +473,9 @@ enum notification_severity {
   INFO
   WARNING
   CRITICAL
+}
+
+enum chatbot_message_role {
+  USER
+  ASSISTANT
 }
