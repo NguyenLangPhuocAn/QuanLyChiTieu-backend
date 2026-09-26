@@ -218,5 +218,46 @@ describe('ChatbotService', () => {
     expect(respond).toHaveBeenCalledTimes(1);
     expect(planned.message).toContain('Chưa có dữ liệu thu chi');
     expect(planned.assistant_message.content).toBe(planned.message);
+
+    for (const scenario of [
+      {
+        question: 'Ghi tiền ăn sáng ba mươi nghìn',
+        intent: 'CREATE_TRANSACTION',
+        transaction: { type: 'EXPENSE', amount: 30000, note: 'Ăn sáng' },
+      },
+      {
+        question: 'Nhận lương 10 triệu',
+        intent: 'CREATE_TRANSACTION',
+        transaction: { type: 'INCOME', amount: 10000000, note: 'Lương' },
+      },
+      {
+        question: 'Nhập hóa đơn này',
+        intent: 'SCAN_RECEIPT',
+        transaction: null,
+      },
+      {
+        question: 'Hóa đơn điện tháng này tăng vì sao?',
+        intent: 'ANALYZE',
+        transaction: null,
+      },
+    ]) {
+      respond.mockResolvedValueOnce({
+        message: JSON.stringify({
+          intent: scenario.intent,
+          transaction: scenario.transaction,
+          message: 'Phân tích hóa đơn điện',
+        }),
+        response_id: 'test',
+        model: 'test',
+      });
+      const reply = await service.send(7, { message: scenario.question });
+      expect(reply.user_message.content).toBe(scenario.question);
+      expect(reply.assistant_message.content).toBe(reply.message);
+      if (scenario.intent === 'ANALYZE') expect(reply.action).toBeNull();
+      else expect(reply.action?.type).toBe(scenario.intent);
+      expect(respond).toHaveBeenLastCalledWith(
+        expect.objectContaining({ responseMimeType: 'application/json' }),
+      );
+    }
   });
 });

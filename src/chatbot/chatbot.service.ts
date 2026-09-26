@@ -8,6 +8,7 @@ import { SavingsService } from '../savings/savings.service';
 import { SendChatMessageDto } from './dto/send-chat-message.dto';
 import { GeminiClient } from './gemini.client';
 import { buildFinancialPlanReply } from './financial-plan-reply';
+import { CHAT_ACTION_INSTRUCTIONS, parseChatReply } from './chat-action';
 
 type MonthlyCashFlowRow = {
   month: string;
@@ -683,16 +684,27 @@ export class ChatbotService {
       context.financial_plan,
       question,
     );
-    const response = guidedPlan
+    const generated = guidedPlan
       ? { message: guidedPlan, response_id: null, model: 'financial-planner' }
       : await this.gemini.respond({
-          instructions: this.instructions(context),
+          instructions: [
+            this.instructions(context),
+            CHAT_ACTION_INSTRUCTIONS,
+            `Ngày hiện tại (Việt Nam): ${new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date())}`,
+          ].join('\n'),
           messages,
+          responseMimeType: 'application/json',
         });
 
-    const categorySpending = this.wantsCategorySpending(question)
-      ? context.top_expense_categories.slice(0, 6)
-      : [];
+    const reply = guidedPlan
+      ? { message: guidedPlan, action: null }
+      : parseChatReply(generated.message);
+    const response = { ...generated, message: reply.message };
+
+    const categorySpending =
+      !reply.action && this.wantsCategorySpending(question)
+        ? context.top_expense_categories.slice(0, 6)
+        : [];
     const title = question.replace(/\s+/g, ' ').trim().slice(0, 80);
     const stored = await this.prisma.$transaction(async (tx) => {
       const conversation = requestedConversation
@@ -733,6 +745,7 @@ export class ChatbotService {
 
     return {
       ...response,
+      action: reply.action,
       category_spending: categorySpending,
       generated_at: new Date().toISOString(),
       context_window_days: 120,

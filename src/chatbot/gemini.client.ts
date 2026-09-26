@@ -123,6 +123,7 @@ export class GeminiClient {
   async respond(input: {
     instructions: string;
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    responseMimeType?: 'application/json';
   }) {
     return this.generate({
       instructions: input.instructions,
@@ -132,6 +133,7 @@ export class GeminiClient {
       })),
       maxOutputTokens: 900,
       temperature: 0.3,
+      responseMimeType: input.responseMimeType,
       unavailableMessage: 'Chatbot chưa thể trả lời lúc này',
     });
   }
