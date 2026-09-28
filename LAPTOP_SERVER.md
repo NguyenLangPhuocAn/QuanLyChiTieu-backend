@@ -1,5 +1,7 @@
 # Chạy backend trên laptop để thử đồ án
 
+> Cập nhật laptop 28/09/2026: backend dùng domain cố định `https://api.quanlychitieucanhan.lol` qua named Cloudflare Tunnel. Health, đăng nhập tài khoản thử và đọc ba ví đã đạt. MySQL chỉ lắng nghe loopback:3307; không mở ra Internet. Xem `../releases/CUSTOM_DOMAIN_SETUP_2026-09-28.md` và `../releases/SERVER-URL.txt`.
+
 Buổi thử APK qua mạng di động dự kiến thứ Sáu 25/09/2026; xem `mobile/APK_REMOTE_TEST_PLAN.md`. Chưa triển khai CH Play. Cấu hình địa chỉ API mobile hiện nằm ở `mobile/src/config/api.config.json`; script `mobile/scripts/configure-api.cjs` chọn chế độ nội bộ hoặc HTTPS từ xa.
 
 Hướng dẫn này dành cho bản thử nghiệm. Laptop chạy backend và kết nối MySQL; điện thoại gửi yêu cầu đến backend. Dữ liệu không tự chuyển sang điện thoại khi tắt laptop. Laptop ngủ, mất mạng hoặc tắt backend thì các chức năng cần server sẽ không dùng được.

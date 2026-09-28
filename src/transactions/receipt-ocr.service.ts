@@ -43,10 +43,9 @@ export class ReceiptOcrService {
     if (typeof value !== 'string') return null;
     const normalized = value.trim().replace(/\s/g, '');
     if (!normalized) return null;
-    const direct = Number(normalized);
-    if (Number.isFinite(direct)) return direct;
-    const digits = normalized.replace(/[^\d-]/g, '');
-    const parsed = Number(digits);
+    // Do not strip punctuation: a foreign receipt's 12,50 must not become 1250.
+    if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return null;
+    const parsed = Number(normalized);
     return Number.isFinite(parsed) ? parsed : null;
   }
 
@@ -100,6 +99,9 @@ export class ReceiptOcrService {
         'Chỉ trích xuất nội dung nhìn thấy; không bịa dữ liệu bị thiếu.',
         'Trả về đúng một JSON object, không Markdown.',
         'amount là tổng thanh toán cuối cùng, sau thuế, phí và giảm giá.',
+        'Không lấy tiền khách đưa, tiền thối/tiền trả lại hoặc số dư làm tổng thanh toán.',
+        'amount phải là số JSON không có dấu phân cách hàng nghìn. Không rõ tổng phải trả thì để null và thêm cảnh báo.',
+        'Ảnh không phải hóa đơn hoặc ảnh mờ không đọc được: không đoán, trả amount=null và cảnh báo.',
         'Chỉ đọc thông tin chung; không trích xuất danh sách từng món, receipt_items luôn là mảng rỗng.',
         'transaction_date dùng YYYY-MM-DD hoặc null.',
       ].join('\n'),
@@ -127,7 +129,8 @@ export class ReceiptOcrService {
           .slice(0, 10)
       : [];
 
-    if (amount === null) warnings.push('Không đọc được tổng thanh toán.');
+    if (amount === null || amount <= 0 || amount > 1e12)
+      warnings.push('Không đọc được tổng thanh toán hợp lệ.');
 
     return {
       merchant:
@@ -139,7 +142,9 @@ export class ReceiptOcrService {
           ? parsed.note.trim().slice(0, 250) || null
           : null,
       amount:
-        amount !== null && amount > 0 ? Math.round(amount * 100) / 100 : null,
+        amount !== null && amount > 0 && amount <= 1e12
+          ? Math.round(amount * 100) / 100
+          : null,
       currency:
         typeof parsed.currency === 'string' &&
         /^[A-Za-z]{3}$/.test(parsed.currency.trim())

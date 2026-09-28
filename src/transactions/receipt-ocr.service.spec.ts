@@ -81,4 +81,26 @@ describe('ReceiptOcrService', () => {
       BadGatewayException,
     );
   });
+
+  it.each(['12,50', '1,234.56', '1.234.567', '', -10, 1e15, null])(
+    'leaves unsafe total %s blank instead of changing its value',
+    async (amount) => {
+      const prisma = {
+        users: { findUnique: jest.fn().mockResolvedValue({ role: 'BASIC' }) },
+        categories: { findMany: jest.fn().mockResolvedValue([]) },
+      };
+      const gemini = {
+        analyzeImage: jest.fn().mockResolvedValue({
+          message: JSON.stringify({ amount, receipt_items: [] }),
+          model: 'test-model',
+        }),
+      };
+      const result = await new ReceiptOcrService(
+        prisma as unknown as PrismaService,
+        gemini as unknown as GeminiClient,
+      ).analyze(7, file);
+      expect(result.amount).toBeNull();
+      expect(result.warnings).toContain('Không đọc được tổng thanh toán hợp lệ.');
+    },
+  );
 });
