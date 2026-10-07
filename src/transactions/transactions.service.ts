@@ -9,6 +9,7 @@ import {
 import { Prisma, categories, transactions } from '@prisma/client';
 import { existsSync } from 'fs';
 import { unlink } from 'fs/promises';
+import { createHash } from 'crypto';
 import { join, normalize } from 'path';
 import { CurrencyService } from '../currency/currency.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -85,7 +86,7 @@ export class TransactionsService {
 
   private async lockUnchangedTransaction(
     tx: Prisma.TransactionClient,
-    expected: transactions,
+    expected: Pick<transactions, 'id' | 'wallet_id' | 'category_id' | 'amount'>,
   ) {
     const rows = await tx.$queryRaw<
       Array<{
@@ -142,6 +143,74 @@ export class TransactionsService {
     }
 
     return decimal;
+  }
+
+  private buildSourceMetadata(dto: CreateTransactionDto) {
+    if (!dto.source && !dto.source_ref) return null;
+    if (!dto.source || !dto.source_ref) {
+      throw new BadRequestException(
+        'Nguồn giao dịch và mã chống trùng phải được gửi cùng nhau',
+      );
+    }
+
+    const sourceRef = `bank:${dto.source_ref.toLowerCase()}`;
+    const payloadHash = createHash('sha256')
+      .update(
+        JSON.stringify({
+          wallet_id: dto.wallet_id,
+          category_id: dto.category_id ?? null,
+          amount: dto.amount,
+          type: dto.type ?? null,
+          note: dto.note?.trim() ?? '',
+          transaction_date: dto.transaction_date ?? null,
+          source: dto.source,
+        }),
+      )
+      .digest('hex');
+
+    return { sourceRef, payloadHash };
+  }
+
+  private async findSourceDuplicate(
+    userId: number,
+    sourceRef: string,
+    payloadHash: string,
+  ) {
+    const marker = await this.prisma.notifications.findFirst({
+      where: {
+        user_id: userId,
+        dedupe_key: sourceRef,
+        source_type: 'BANK_NOTIFICATION_IMPORT',
+      },
+      select: {
+        message: true,
+        source_id: true,
+      },
+    });
+    if (!marker) return null;
+    if (marker.message !== payloadHash) {
+      throw new ConflictException(
+        'Thông báo ngân hàng này đã được xử lý với nội dung khác',
+      );
+    }
+    if (!marker.source_id) {
+      throw new ConflictException('Thông báo ngân hàng đang được xử lý');
+    }
+
+    const existing = await this.prisma.transactions.findUnique({
+      where: { id: marker.source_id },
+      select: this.transactionSelect,
+    });
+    if (!existing?.wallet_id)
+      throw new ConflictException('Thông báo ngân hàng này đã được xử lý');
+
+    const wallet = await this.getOwnedWallet(userId, existing.wallet_id);
+    const [normalized] = await this.attachCategories(
+      userId,
+      [existing],
+      new Map([[wallet.id, wallet.currency]]),
+    );
+    return normalized;
   }
 
   private async adjustWalletBalance(
@@ -801,6 +870,15 @@ export class TransactionsService {
   }
 
   async create(userId: number, dto: CreateTransactionDto) {
+    const sourceMetadata = this.buildSourceMetadata(dto);
+    if (sourceMetadata) {
+      const duplicate = await this.findSourceDuplicate(
+        userId,
+        sourceMetadata.sourceRef,
+        sourceMetadata.payloadHash,
+      );
+      if (duplicate) return duplicate;
+    }
     const wallet = await this.getOwnedWallet(userId, dto.wallet_id);
     const type = await this.resolveType(userId, dto.category_id, dto.type);
     const signedAmount = this.toSignedAmount(dto.amount, type);
@@ -812,29 +890,66 @@ export class TransactionsService {
     );
     const receiptItems = this.normalizeReceiptItems(dto.receipt_items);
 
-    const created = await this.prisma.$transaction(async (tx) => {
-      const transaction = await tx.transactions.create({
-        data: {
-          wallet_id: dto.wallet_id,
-          category_id: dto.category_id,
-          amount: signedAmount,
-          ...conversionSnapshot,
-          note: dto.note,
-          receipt_image: dto.receipt_image,
-          receipt_items: receiptItems,
-          transaction_date: dto.transaction_date
-            ? this.parseTransactionDate(dto.transaction_date)
-            : new Date(),
-        },
-        select: this.transactionSelect,
+    let created;
+    try {
+      created = await this.prisma.$transaction(async (tx) => {
+        const sourceMarker = sourceMetadata
+          ? await tx.notifications.create({
+              data: {
+                user_id: userId,
+                type: 'SYSTEM',
+                severity: 'INFO',
+                title: 'Đồng bộ giao dịch ngân hàng',
+                message: sourceMetadata.payloadHash,
+                source_type: 'BANK_NOTIFICATION_IMPORT',
+                dedupe_key: sourceMetadata.sourceRef,
+                read_at: new Date(),
+                deleted_at: new Date(),
+              },
+              select: { id: true },
+            })
+          : null;
+        const transaction = await tx.transactions.create({
+          data: {
+            wallet_id: dto.wallet_id,
+            category_id: dto.category_id,
+            amount: signedAmount,
+            ...conversionSnapshot,
+            note: dto.note,
+            receipt_image: dto.receipt_image,
+            receipt_items: receiptItems,
+            transaction_date: dto.transaction_date
+              ? this.parseTransactionDate(dto.transaction_date)
+              : new Date(),
+          },
+          select: this.transactionSelect,
+        });
+
+        await this.adjustWalletBalance(tx, userId, wallet, signedAmount);
+        await this.syncTags(tx, userId, transaction.id, dto.tags);
+        if (sourceMarker) {
+          await tx.notifications.update({
+            where: { id: sourceMarker.id },
+            data: { source_id: transaction.id },
+          });
+        }
+        return transaction;
       });
-
-      await this.adjustWalletBalance(tx, userId, wallet, signedAmount);
-
-      await this.syncTags(tx, userId, transaction.id, dto.tags);
-
-      return transaction;
-    });
+    } catch (error) {
+      if (
+        sourceMetadata &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        const duplicate = await this.findSourceDuplicate(
+          userId,
+          sourceMetadata.sourceRef,
+          sourceMetadata.payloadHash,
+        );
+        if (duplicate) return duplicate;
+      }
+      throw error;
+    }
 
     if (type === TransactionType.EXPENSE) {
       await this.notifyBudgetAfterCommit(userId, dto.wallet_id);

@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Prisma } from '@prisma/client';
+import { createHash } from 'crypto';
 import { CurrencyService } from '../currency/currency.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -11,6 +12,10 @@ const createPrismaMock = () => {
     $queryRaw: jest.fn(),
     transactions: {
       create: jest.fn(),
+      update: jest.fn(),
+    },
+    notifications: {
+      create: jest.fn().mockResolvedValue({ id: 91 }),
       update: jest.fn(),
     },
     wallets: {
@@ -34,9 +39,13 @@ const createPrismaMock = () => {
     },
     transactions: {
       findUnique: jest.fn(),
+      findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn(),
       count: jest.fn(),
       aggregate: jest.fn(),
+    },
+    notifications: {
+      findFirst: jest.fn().mockResolvedValue(null),
     },
     wallets: {
       update: jest.fn(),
@@ -286,6 +295,177 @@ describe('TransactionsService', () => {
       });
     },
   );
+
+  it('stores a private idempotency key for a bank notification', async () => {
+    const prisma = createPrismaMock();
+    const currencyService = {
+      normalizeCurrency: jest.fn((value?: string | null) => value ?? 'VND'),
+      convertAmount: jest.fn().mockResolvedValue({
+        amount: 30000,
+        rate: 1,
+        fromCurrency: 'VND',
+        toCurrency: 'VND',
+      }),
+    };
+    prisma.$queryRaw.mockResolvedValue([
+      { id: 2, user_id: 7, currency: 'VND' },
+    ]);
+    prisma.users.findUnique
+      .mockResolvedValueOnce({ role: 'BASIC' })
+      .mockResolvedValueOnce({ currency_default: 'VND' })
+      .mockResolvedValueOnce({ currency_default: 'VND' });
+    prisma.categories.findFirst.mockResolvedValue({
+      id: 3,
+      name: 'Ăn uống',
+      type: 'EXPENSE',
+      icon: null,
+    });
+    prisma.categories.findMany.mockResolvedValue([
+      { id: 3, name: 'Ăn uống', type: 'EXPENSE', icon: null },
+    ]);
+    prisma.tx.transactions.create.mockResolvedValue({
+      id: 10,
+      wallet_id: 2,
+      category_id: 3,
+      amount: new Prisma.Decimal(-30000),
+      currency: 'VND',
+      converted_amount: new Prisma.Decimal(-30000),
+      converted_currency: 'VND',
+      exchange_rate_used: new Prisma.Decimal(1),
+      note: 'Từ ngân hàng',
+      receipt_image: null,
+      receipt_items: null,
+      transaction_date: new Date('2026-10-07T08:30:00.000Z'),
+      created_at: new Date('2026-10-07T08:31:00.000Z'),
+    });
+    const service = new TransactionsService(
+      prisma as unknown as PrismaService,
+      currencyService as unknown as CurrencyService,
+      { createBudgetAlertsForWallet: jest.fn() } as unknown as NotificationsService,
+    );
+    const fingerprint = 'a'.repeat(64);
+
+    await service.create(7, {
+      wallet_id: 2,
+      category_id: 3,
+      amount: '30000',
+      type: TransactionType.EXPENSE,
+      note: 'Từ ngân hàng',
+      transaction_date: '2026-10-07',
+      source: 'BANK_NOTIFICATION',
+      source_ref: fingerprint,
+    });
+
+    expect(prisma.tx.notifications.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          user_id: 7,
+          source_type: 'BANK_NOTIFICATION_IMPORT',
+          dedupe_key: `bank:${fingerprint}`,
+          message: expect.stringMatching(/^[a-f0-9]{64}$/),
+          deleted_at: expect.any(Date),
+        }),
+      }),
+    );
+    expect(prisma.tx.notifications.update).toHaveBeenCalledWith({
+      where: { id: 91 },
+      data: { source_id: 10 },
+    });
+  });
+
+  it('returns the existing transaction without changing the balance for a repeated bank notification', async () => {
+    const prisma = createPrismaMock();
+    const fingerprint = 'b'.repeat(64);
+    const payload = {
+      wallet_id: 2,
+      category_id: 3,
+      amount: '30000',
+      type: TransactionType.EXPENSE,
+      note: 'Từ ngân hàng',
+      transaction_date: '2026-10-07',
+      source: 'BANK_NOTIFICATION' as const,
+      source_ref: fingerprint,
+    };
+    const payloadHash = createHash('sha256')
+      .update(
+        JSON.stringify({
+          wallet_id: payload.wallet_id,
+          category_id: payload.category_id,
+          amount: payload.amount,
+          type: payload.type,
+          note: payload.note,
+          transaction_date: payload.transaction_date,
+          source: payload.source,
+        }),
+      )
+      .digest('hex');
+    prisma.notifications.findFirst.mockResolvedValue({
+      message: payloadHash,
+      source_id: 10,
+    });
+    prisma.transactions.findUnique.mockResolvedValue({
+      id: 10,
+      wallet_id: 2,
+      category_id: 3,
+      amount: new Prisma.Decimal(-30000),
+      currency: 'VND',
+      converted_amount: new Prisma.Decimal(-30000),
+      converted_currency: 'VND',
+      exchange_rate_used: new Prisma.Decimal(1),
+      note: payload.note,
+      receipt_image: null,
+      receipt_items: null,
+      transaction_date: new Date('2026-10-07T00:00:00.000Z'),
+      created_at: new Date('2026-10-07T08:31:00.000Z'),
+    });
+    prisma.$queryRaw.mockResolvedValue([
+      { id: 2, user_id: 7, currency: 'VND' },
+    ]);
+    prisma.users.findUnique.mockResolvedValue({ currency_default: 'VND' });
+    prisma.categories.findMany.mockResolvedValue([
+      { id: 3, name: 'Ăn uống', type: 'EXPENSE', icon: null },
+    ]);
+    const service = new TransactionsService(
+      prisma as unknown as PrismaService,
+      {
+        normalizeCurrency: (value?: string | null) => value ?? 'VND',
+      } as CurrencyService,
+      {} as NotificationsService,
+    );
+
+    const result = await service.create(7, payload);
+
+    expect(result).toEqual(expect.objectContaining({ id: 10 }));
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.tx.wallets.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a reused bank notification key when its payload changed', async () => {
+    const prisma = createPrismaMock();
+    prisma.notifications.findFirst.mockResolvedValue({
+      message: 'c'.repeat(64),
+      source_id: 10,
+    });
+    const service = new TransactionsService(
+      prisma as unknown as PrismaService,
+      {} as CurrencyService,
+      {} as NotificationsService,
+    );
+
+    await expect(
+      service.create(7, {
+        wallet_id: 2,
+        category_id: 3,
+        amount: '99000',
+        type: TransactionType.EXPENSE,
+        note: 'Nội dung đã thay đổi',
+        transaction_date: '2026-10-07',
+        source: 'BANK_NOTIFICATION',
+        source_ref: 'd'.repeat(64),
+      }),
+    ).rejects.toThrow('đã được xử lý với nội dung khác');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
 
   it('does not recompute conversion snapshot when only updating the note', async () => {
     const prisma = createPrismaMock();

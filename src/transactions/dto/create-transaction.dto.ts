@@ -4,6 +4,7 @@ import {
   IsDateString,
   IsEnum,
   IsInt,
+  IsIn,
   IsOptional,
   IsString,
   Matches,
@@ -13,6 +14,9 @@ export enum TransactionType {
   INCOME = 'INCOME',
   EXPENSE = 'EXPENSE',
 }
+
+export const transactionSources = ['BANK_NOTIFICATION'] as const;
+export type TransactionSource = (typeof transactionSources)[number];
 
 export class CreateTransactionDto {
   @IsInt()
@@ -53,4 +57,14 @@ export class CreateTransactionDto {
   @IsArray()
   @IsString({ each: true })
   tags?: string[];
+
+  @IsOptional()
+  @IsIn(transactionSources)
+  source?: TransactionSource;
+
+  @IsOptional()
+  @Matches(/^[a-f0-9]{64}$/i, {
+    message: 'Mã nguồn giao dịch chưa hợp lệ',
+  })
+  source_ref?: string;
 }
