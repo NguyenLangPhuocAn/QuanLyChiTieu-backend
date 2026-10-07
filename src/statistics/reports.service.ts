@@ -1165,6 +1165,49 @@ export class ReportsService {
       });
     }
 
+    sectionTitle('Chi tiết hóa đơn');
+    const rowsWithReceiptItems = receiptRows.filter(
+      (row) => row.receiptItems.length,
+    );
+    if (!rowsWithReceiptItems.length) {
+      doc
+        .fontSize(9)
+        .text('Không có dòng chi tiết hóa đơn đã được lưu trong kỳ.');
+    } else {
+      rowsWithReceiptItems.forEach((row) => {
+        ensureSpace(34, 'Chi tiết hóa đơn (tiếp)');
+        useBold();
+        doc
+          .fontSize(9)
+          .text(
+            `Giao dịch #${row.id} · ${formatDate(row.date)} · ${row.category}`,
+          );
+        useRegular();
+        row.receiptItems.forEach((item, index) => {
+          const line = `${index + 1}. ${item.name} · ${money(item.amount, row.originalCurrency)}`;
+          const lineHeight = doc.heightOfString(line, {
+            width: doc.page.width - 100,
+          });
+          ensureSpace(lineHeight + 8, 'Chi tiết hóa đơn (tiếp)');
+          doc
+            .fontSize(8.5)
+            .fillColor('#333333')
+            .text(line, { indent: 12, width: doc.page.width - 100 });
+        });
+        if (Math.abs(row.receiptDifference) > 0.01) {
+          ensureSpace(22, 'Chi tiết hóa đơn (tiếp)');
+          doc
+            .fontSize(8)
+            .fillColor('#B45309')
+            .text(
+              `Cần kiểm tra: tổng chi tiết chênh ${money(row.receiptDifference, row.originalCurrency)} so với giao dịch.`,
+              { indent: 12 },
+            );
+        }
+        doc.fillColor('#000000').moveDown(0.25);
+      });
+    }
+
     sectionTitle('Giao dịch trong kỳ (theo ngày tăng dần)');
 
     data.rows.forEach((row) => {

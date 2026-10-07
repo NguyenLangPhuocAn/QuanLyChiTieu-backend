@@ -331,5 +331,30 @@ describe('ReportsService', () => {
     const pdf = await service.exportPdf(data);
     const pdfSource = Buffer.from(pdf.base64, 'base64').toString('latin1');
     expect(pdfSource.match(/\/Type \/Page\b/g)).toHaveLength(1);
+
+    const multiPageData: ReportData = {
+      ...data,
+      summary: {
+        ...data.summary,
+        expense: 7200000,
+        net: -7200000,
+        transactionCount: 60,
+        receiptCount: 60,
+        receiptItemCount: 60,
+      },
+      rows: Array.from({ length: 60 }, (_, index) => ({
+        ...data.rows[0],
+        id: index + 1,
+        note: `Hóa đơn kiểm thử nhiều trang ${index + 1}`,
+      })),
+    };
+    const multiPagePdf = await service.exportPdf(multiPageData);
+    const multiPageSource = Buffer.from(
+      multiPagePdf.base64,
+      'base64',
+    ).toString('latin1');
+    const pageCount = multiPageSource.match(/\/Type \/Page\b/g)?.length ?? 0;
+    expect(pageCount).toBeGreaterThan(1);
+    expect(pageCount).toBeLessThan(12);
   });
 });
