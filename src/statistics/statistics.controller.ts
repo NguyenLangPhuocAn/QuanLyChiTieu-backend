@@ -91,6 +91,35 @@ export class StatisticsController {
     );
   }
 
+  @Get('report/preview')
+  previewReport(
+    @Req() req: AuthenticatedRequest,
+    @Query('period') period?: ReportPeriod,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+    @Query('walletId') walletId?: string,
+  ) {
+    if (
+      period &&
+      !['all', 'day', 'week', 'month', 'quarter', 'year', 'custom'].includes(
+        period,
+      )
+    ) {
+      throw new BadRequestException('Kỳ thống kê không hợp lệ');
+    }
+
+    return this.reportsService.previewReport(
+      req.user.userId,
+      req.user.role ?? null,
+      period ?? 'month',
+      {
+        dateFrom,
+        dateTo,
+        ...(walletId === undefined ? {} : { walletId: Number(walletId) }),
+      },
+    );
+  }
+
   @Post('report/email')
   sendExcelReport(
     @Req() req: AuthenticatedRequest,

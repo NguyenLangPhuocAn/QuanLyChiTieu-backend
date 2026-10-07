@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Prisma } from '@prisma/client';
+import ExcelJS from 'exceljs';
 import { ReportsService } from './reports.service';
 import type { StatisticsPeriod } from './statistics.service';
 
@@ -19,9 +20,11 @@ type ReportData = {
     expense: number;
     net: number;
     transactionCount: number;
+    receiptCount: number;
+    receiptItemCount: number;
   };
   wallets: unknown[];
-  rows: Array<{ category: string }>;
+  rows: Array<Record<string, unknown> & { category: string }>;
   periodLabel: string;
 };
 
@@ -43,6 +46,7 @@ type ReportsServiceTestAccess = Pick<ReportsService, 'sendExcelReport'> & {
     period: StatisticsPeriod,
   ): Promise<ReportData>;
   exportExcel(data: ReportData): Promise<ReportFile>;
+  exportPdf(data: ReportData): Promise<ReportFile>;
   sendMail(
     to: string,
     subject: string,
@@ -216,6 +220,8 @@ describe('ReportsService', () => {
         expense: 1200000,
         net: 3800000,
         transactionCount: 8,
+        receiptCount: 0,
+        receiptItemCount: 0,
       },
       wallets: [],
       rows: [],
@@ -245,5 +251,85 @@ describe('ReportsService', () => {
       }),
     );
     expect(sendMail.mock.calls[0][4]?.html).toContain('Quản tiền rõ ràng');
+  });
+
+  it('exports all report sections and protects spreadsheet text cells', async () => {
+    const service = new ReportsService(
+      {} as never,
+      currencyService as never,
+    ) as unknown as ReportsServiceTestAccess;
+    const data: ReportData = {
+      user: { email: 'user@example.com', full_name: 'User' },
+      period: 'month',
+      range: {
+        start: new Date('2026-09-01T00:00:00.000Z'),
+        end: new Date('2026-10-01T00:00:00.000Z'),
+      },
+      displayCurrency: 'VND',
+      summary: {
+        income: 0,
+        expense: 120000,
+        net: -120000,
+        transactionCount: 1,
+        receiptCount: 1,
+        receiptItemCount: 1,
+      },
+      wallets: [
+        {
+          name: 'Tiền mặt',
+          wallet_type: 'CASH',
+          currency: 'VND',
+          balance: new Prisma.Decimal(880000),
+        },
+      ],
+      rows: [
+        {
+          id: 9,
+          date: new Date('2026-09-10T00:00:00.000Z'),
+          wallet: 'Tiền mặt',
+          walletType: 'CASH',
+          category: 'Ăn uống',
+          type: 'Chi',
+          amount: 120000,
+          currency: 'VND',
+          originalAmount: 120000,
+          originalCurrency: 'VND',
+          exchangeRateUsed: 1,
+          note: '=HYPERLINK("https://example.com")',
+          tags: ['bữa-trưa'],
+          hasReceiptImage: true,
+          receiptItems: [{ name: 'Cơm trưa', amount: 120000 }],
+          receiptItemTotal: 120000,
+          receiptDifference: 0,
+          receiptStatus: 'Chi tiết khớp tổng giao dịch',
+        },
+      ],
+      periodLabel: 'tháng',
+    };
+
+    const report = await service.exportExcel(data);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(Buffer.from(report.base64, 'base64'));
+
+    expect(workbook.worksheets.map((sheet) => sheet.name)).toEqual([
+      'Tổng quan',
+      'Giao dịch',
+      'Hóa đơn',
+      'Chi tiết hóa đơn',
+      'Danh mục',
+      'Thu chi theo kỳ',
+      'Ví',
+      'Giải thích',
+    ]);
+    expect(workbook.getWorksheet('Giao dịch')?.getCell('M2').value).toBe(
+      "'=HYPERLINK(\"https://example.com\")",
+    );
+    expect(
+      workbook.getWorksheet('Chi tiết hóa đơn')?.getCell('D2').value,
+    ).toBe('Cơm trưa');
+
+    const pdf = await service.exportPdf(data);
+    const pdfSource = Buffer.from(pdf.base64, 'base64').toString('latin1');
+    expect(pdfSource.match(/\/Type \/Page\b/g)).toHaveLength(1);
   });
 });

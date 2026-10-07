@@ -7,16 +7,19 @@ describe('StatisticsController', () => {
   const makeController = () => {
     const getUserStatistics = jest.fn();
     const exportReport = jest.fn();
+    const previewReport = jest.fn();
     const statisticsService = {
       getUserStatistics,
     } as unknown as jest.Mocked<StatisticsService>;
     const reportsService = {
       exportReport,
+      previewReport,
     } as unknown as jest.Mocked<ReportsService>;
 
     return {
       getUserStatistics,
       exportReport,
+      previewReport,
       statisticsService,
       controller: new StatisticsController(statisticsService, reportsService),
     };
@@ -66,5 +69,30 @@ describe('StatisticsController', () => {
       dateFrom: '2026-04-01',
       dateTo: '2026-06-30',
     });
+  });
+
+  it('uses the same filters for report preview', () => {
+    const { controller, previewReport } = makeController();
+
+    void controller.previewReport(
+      { user: { userId: 7, role: 'PREMIUM' } } as Parameters<
+        StatisticsController['previewReport']
+      >[0],
+      'custom',
+      '2026-09-01',
+      '2026-09-30',
+      '12',
+    );
+
+    expect(previewReport).toHaveBeenCalledWith(
+      7,
+      'PREMIUM',
+      'custom',
+      {
+        dateFrom: '2026-09-01',
+        dateTo: '2026-09-30',
+        walletId: 12,
+      },
+    );
   });
 });

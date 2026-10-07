@@ -76,7 +76,14 @@ type ReportTransaction = {
   converted_currency?: string | null;
   exchange_rate_used?: Prisma.Decimal | null;
   note: string | null;
+  receipt_image?: string | null;
+  receipt_items?: Prisma.JsonValue | null;
   transaction_date: Date;
+};
+
+type ReceiptItem = {
+  name: string;
+  amount: number;
 };
 
 type ReportRow = {
@@ -88,8 +95,16 @@ type ReportRow = {
   type: string;
   amount: number;
   currency: string;
+  originalAmount: number;
+  originalCurrency: string;
+  exchangeRateUsed: number | null;
   note: string;
   tags: string[];
+  hasReceiptImage: boolean;
+  receiptItems: ReceiptItem[];
+  receiptItemTotal: number;
+  receiptDifference: number;
+  receiptStatus: string;
 };
 
 type ReportCategoryMeta = {
@@ -113,6 +128,14 @@ const formatFileDate = (date: Date) =>
 
 const isEmail = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
+const REPORT_METHODOLOGY =
+  'Chỉ tính thu/chi thông thường; loại trừ chuyển nội bộ, gửi/rút tiết kiệm và vay/nợ. Chênh lệch thu – chi không phải số dư ví. Các khoản được quy đổi về tiền tệ báo cáo; ưu tiên giá trị quy đổi đã lưu, nếu chưa có dùng tỷ giá tại lúc tạo báo cáo.';
+
+const safeSpreadsheetText = (value: string | null | undefined) => {
+  const text = value ?? '';
+  return /^[\s]*[=+\-@]/.test(text) ? `'${text}` : text;
+};
+
 @Injectable()
 export class ReportsService {
   private readonly sendingUsers = new Set<number>();
@@ -120,6 +143,24 @@ export class ReportsService {
     private prisma: PrismaService,
     private currencyService: CurrencyService,
   ) {}
+
+  private normalizeReceiptItems(value: Prisma.JsonValue | null | undefined) {
+    if (!Array.isArray(value)) return [];
+
+    return value.flatMap((item): ReceiptItem[] => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+      const record = item as Record<string, Prisma.JsonValue>;
+      const name = typeof record.name === 'string' ? record.name.trim() : '';
+      const amount =
+        typeof record.amount === 'number'
+          ? record.amount
+          : typeof record.amount === 'string'
+            ? Number(record.amount)
+            : Number.NaN;
+      if (!name || !Number.isFinite(amount) || amount < 0) return [];
+      return [{ name, amount }];
+    });
+  }
 
   private parseInputDate(value?: string) {
     if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -310,6 +351,8 @@ export class ReportsService {
             converted_currency: true,
             exchange_rate_used: true,
             note: true,
+            receipt_image: true,
+            receipt_items: true,
             transaction_date: true,
           },
           orderBy: { transaction_date: 'asc' },
@@ -380,6 +423,24 @@ export class ReportsService {
         wallet?.currency ?? 'VND',
         displayCurrency,
       );
+      const originalAmount = Number(signedAmount.abs());
+      const originalCurrency = this.currencyService.normalizeCurrency(
+        transaction.currency ?? wallet?.currency ?? 'VND',
+      );
+      const receiptItems = this.normalizeReceiptItems(transaction.receipt_items);
+      const receiptItemTotal = receiptItems.reduce(
+        (sum, item) => sum + item.amount,
+        0,
+      );
+      const receiptDifference = receiptItemTotal - originalAmount;
+      const hasReceiptImage = Boolean(transaction.receipt_image);
+      const receiptStatus = receiptItems.length
+        ? Math.abs(receiptDifference) <= Math.max(1, originalAmount * 0.001)
+          ? 'Chi tiết khớp tổng giao dịch'
+          : 'Cần kiểm tra chênh lệch'
+        : hasReceiptImage
+          ? 'Có ảnh, chưa có chi tiết món'
+          : 'Không có hóa đơn';
 
       if (signedAmount.greaterThanOrEqualTo(0)) {
         income += amount;
@@ -396,8 +457,18 @@ export class ReportsService {
         type: signedAmount.greaterThanOrEqualTo(0) ? 'Thu' : 'Chi',
         amount,
         currency: displayCurrency,
+        originalAmount,
+        originalCurrency,
+        exchangeRateUsed: transaction.exchange_rate_used
+          ? Number(transaction.exchange_rate_used)
+          : null,
         note: transaction.note ?? '',
         tags: tagMap.get(transaction.id) ?? [],
+        hasReceiptImage,
+        receiptItems,
+        receiptItemTotal,
+        receiptDifference,
+        receiptStatus,
       });
     }
 
@@ -411,10 +482,59 @@ export class ReportsService {
         expense,
         net: income - expense,
         transactionCount: reportTransactions.length,
+        receiptCount: rows.filter(
+          (row) => row.hasReceiptImage || row.receiptItems.length,
+        ).length,
+        receiptItemCount: rows.reduce(
+          (sum, row) => sum + row.receiptItems.length,
+          0,
+        ),
       },
       wallets,
       rows,
       periodLabel: periodLabels[period],
+    };
+  }
+
+  async previewReport(
+    userId: number,
+    role: string | null,
+    period: ReportPeriod,
+    requestedRange: ReportDateRange = {},
+  ) {
+    const data = await this.buildReportData(
+      userId,
+      role,
+      period,
+      requestedRange,
+    );
+    const analysis = analyzeReportRows(data.rows);
+
+    return {
+      period: data.period,
+      periodLabel: data.periodLabel,
+      range: {
+        dateFrom: formatDate(data.range.start),
+        dateTo: formatDate(new Date(data.range.end.getTime() - 1)),
+      },
+      displayCurrency: data.displayCurrency,
+      walletScope:
+        data.wallets.length === 1
+          ? data.wallets[0].name
+          : `Tất cả ví (${data.wallets.length})`,
+      summary: data.summary,
+      topExpenseCategories: analysis.categories.slice(0, 5),
+      sections: [
+        'Tổng quan',
+        'Giao dịch',
+        'Hóa đơn',
+        'Chi tiết hóa đơn',
+        'Danh mục',
+        'Thu chi theo kỳ',
+        'Ví',
+        'Giải thích',
+      ],
+      methodology: REPORT_METHODOLOGY,
     };
   }
 
@@ -500,8 +620,7 @@ export class ReportsService {
         (row) =>
           `${row.category}: ${money(row.amount)} (${row.percent.toFixed(1)}%), ${row.count} giao dịch`,
       );
-    const methodology =
-      'Chỉ tính thu/chi thông thường; loại trừ chuyển nội bộ và vay/nợ. Chênh lệch thu – chi không phải số dư ví. Các khoản được quy đổi về tiền tệ báo cáo; ưu tiên giá trị quy đổi đã lưu, nếu chưa có dùng tỷ giá tại lúc tạo báo cáo.';
+    const methodology = REPORT_METHODOLOGY;
     const html = buildReportEmailHtml({
       recipientName: data.user.full_name || data.user.email,
       periodLabel: periodLabels[period],
@@ -531,7 +650,8 @@ export class ReportsService {
           ? topCategories
           : ['Không có khoản chi trong khoảng đã chọn.']),
         '',
-        'File Excel gồm: tổng quan, toàn bộ giao dịch, chi theo danh mục, thu chi theo tháng và số dư ví hiện tại.',
+        `Hóa đơn: ${data.summary.receiptCount}; dòng chi tiết hóa đơn: ${data.summary.receiptItemCount}.`,
+        'File Excel gồm: tổng quan, giao dịch, hóa đơn, chi tiết hóa đơn, danh mục, thu chi theo kỳ, ví và phần giải thích.',
         methodology,
       ].join('\n'),
       {
@@ -608,8 +728,59 @@ export class ReportsService {
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'QuanLyChiTieu';
     workbook.created = new Date();
+    workbook.modified = new Date();
+    workbook.subject = `Báo cáo thu chi ${data.periodLabel}`;
 
-    const summarySheet = workbook.addWorksheet('Tong quan');
+    const moneyFormat = data.displayCurrency === 'VND' ? '#,##0' : '#,##0.00';
+    const headerFill: ExcelJS.Fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFF57C00' },
+    };
+    const styleSheet = (sheet: ExcelJS.Worksheet, hasFilter = true) => {
+      sheet.views = [{ state: 'frozen', ySplit: 1 }];
+      sheet.properties.defaultRowHeight = 20;
+      sheet.pageSetup = {
+        orientation: sheet.columnCount > 7 ? 'landscape' : 'portrait',
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        paperSize: 9,
+        margins: {
+          left: 0.3,
+          right: 0.3,
+          top: 0.5,
+          bottom: 0.5,
+          header: 0.2,
+          footer: 0.2,
+        },
+      };
+      const header = sheet.getRow(1);
+      header.height = 28;
+      header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      header.fill = headerFill;
+      header.alignment = { vertical: 'middle', wrapText: true };
+      if (hasFilter && sheet.columnCount > 0) {
+        sheet.autoFilter = {
+          from: { row: 1, column: 1 },
+          to: { row: Math.max(1, sheet.rowCount), column: sheet.columnCount },
+        };
+      }
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) {
+          row.alignment = { vertical: 'top', wrapText: true };
+          if (rowNumber % 2 === 0) {
+            row.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: 'FFFFF8F1' },
+            };
+          }
+        }
+      });
+    };
+
+    const summarySheet = workbook.addWorksheet('Tổng quan');
     summarySheet.columns = [
       { header: 'Mục', key: 'label', width: 28 },
       { header: 'Giá trị', key: 'value', width: 32 },
@@ -628,10 +799,16 @@ export class ReportsService {
       { label: 'Tổng chi', value: data.summary.expense },
       { label: 'Chênh lệch thu – chi', value: data.summary.net },
       { label: 'Số giao dịch', value: data.summary.transactionCount },
-      { label: 'Thời điểm tạo', value: new Date().toISOString() },
+      { label: 'Số hóa đơn', value: data.summary.receiptCount },
+      {
+        label: 'Số dòng chi tiết hóa đơn',
+        value: data.summary.receiptItemCount,
+      },
+      { label: 'Thời điểm tạo', value: new Date() },
       {
         label: 'Phạm vi',
-        value: 'Thu/chi thông thường; không gồm chuyển nội bộ và vay/nợ.',
+        value:
+          'Thu/chi thông thường; không gồm chuyển nội bộ, gửi/rút tiết kiệm và vay/nợ.',
       },
       {
         label: 'Quy đổi',
@@ -644,47 +821,135 @@ export class ReportsService {
           'Số dư trong sheet Ví là hiện tại, không phải số dư cuối kỳ báo cáo.',
       },
     ]);
-    summarySheet.getRow(1).font = { bold: true };
+    [8, 9, 10].forEach((row) => {
+      summarySheet.getCell(row, 2).numFmt = moneyFormat;
+    });
+    summarySheet.getCell(14, 2).numFmt = 'dd/mm/yyyy hh:mm';
 
-    const transactionSheet = workbook.addWorksheet('Giao dich');
+    const transactionSheet = workbook.addWorksheet('Giao dịch');
     transactionSheet.columns = [
+      { header: 'Mã giao dịch', key: 'id', width: 15 },
       { header: 'Ngày', key: 'date', width: 14 },
+      { header: 'Loại', key: 'type', width: 10 },
       { header: 'Ví', key: 'wallet', width: 22 },
       { header: 'Loại ví', key: 'walletType', width: 14 },
-      { header: 'Loại', key: 'type', width: 10 },
       { header: 'Danh mục', key: 'category', width: 22 },
-      { header: 'Số tiền', key: 'amount', width: 18 },
-      { header: 'Tiền tệ', key: 'currency', width: 10 },
+      { header: 'Số tiền gốc', key: 'originalAmount', width: 18 },
+      { header: 'Tiền tệ gốc', key: 'originalCurrency', width: 14 },
+      { header: 'Tỷ giá đã lưu', key: 'exchangeRateUsed', width: 18 },
+      { header: 'Số tiền quy đổi', key: 'amount', width: 20 },
+      { header: 'Tiền tệ báo cáo', key: 'currency', width: 17 },
       { header: 'Hashtag', key: 'tags', width: 28 },
       { header: 'Ghi chú', key: 'note', width: 36 },
+      { header: 'Trạng thái hóa đơn', key: 'receiptStatus', width: 31 },
     ];
     transactionSheet.addRows(
       data.rows.map((row) => ({
-        date: formatDate(row.date),
-        wallet: row.wallet,
-        walletType: row.walletType,
+        id: row.id,
+        date: row.date,
         type: row.type,
-        category: row.category,
+        wallet: safeSpreadsheetText(row.wallet),
+        walletType: safeSpreadsheetText(row.walletType),
+        category: safeSpreadsheetText(row.category),
+        originalAmount: row.originalAmount,
+        originalCurrency: row.originalCurrency,
+        exchangeRateUsed: row.exchangeRateUsed,
         amount: row.amount,
         currency: row.currency,
-        tags: row.tags.map((tag) => `#${tag}`).join(' '),
-        note: row.note,
+        tags: safeSpreadsheetText(
+          row.tags.map((tag) => `#${tag}`).join(' '),
+        ),
+        note: safeSpreadsheetText(row.note),
+        receiptStatus: row.receiptStatus,
       })),
     );
-    transactionSheet.getRow(1).font = { bold: true };
-    transactionSheet.getColumn('amount').numFmt = '#,##0.00';
+    transactionSheet.getColumn('date').numFmt = 'dd/mm/yyyy';
+    transactionSheet.getColumn('originalAmount').numFmt = '#,##0.00';
+    transactionSheet.getColumn('exchangeRateUsed').numFmt = '#,##0.########';
+    transactionSheet.getColumn('amount').numFmt = moneyFormat;
+
+    const receiptRows = data.rows.filter(
+      (row) => row.hasReceiptImage || row.receiptItems.length,
+    );
+    const receiptSheet = workbook.addWorksheet('Hóa đơn');
+    receiptSheet.columns = [
+      { header: 'Mã giao dịch', key: 'id', width: 15 },
+      { header: 'Ngày', key: 'date', width: 14 },
+      { header: 'Ví', key: 'wallet', width: 22 },
+      { header: 'Danh mục', key: 'category', width: 22 },
+      { header: 'Ghi chú chung', key: 'note', width: 34 },
+      { header: 'Tổng giao dịch', key: 'transactionTotal', width: 20 },
+      { header: 'Tổng các món đã đọc', key: 'itemTotal', width: 22 },
+      { header: 'Chênh lệch', key: 'difference', width: 18 },
+      { header: 'Tiền tệ gốc', key: 'currency', width: 14 },
+      { header: 'Số món đã đọc', key: 'itemCount', width: 17 },
+      { header: 'Có ảnh', key: 'hasImage', width: 11 },
+      { header: 'Kết quả kiểm tra', key: 'status', width: 31 },
+    ];
+    receiptSheet.addRows(
+      receiptRows.map((row) => ({
+        id: row.id,
+        date: row.date,
+        wallet: safeSpreadsheetText(row.wallet),
+        category: safeSpreadsheetText(row.category),
+        note: safeSpreadsheetText(row.note),
+        transactionTotal: row.originalAmount,
+        itemTotal: row.receiptItemTotal,
+        difference: row.receiptDifference,
+        currency: row.originalCurrency,
+        itemCount: row.receiptItems.length,
+        hasImage: row.hasReceiptImage ? 'Có' : 'Không',
+        status: row.receiptStatus,
+      })),
+    );
+    receiptSheet.getColumn('date').numFmt = 'dd/mm/yyyy';
+    ['transactionTotal', 'itemTotal', 'difference'].forEach((key) => {
+      receiptSheet.getColumn(key).numFmt = '#,##0.00';
+    });
+
+    const receiptDetailSheet = workbook.addWorksheet('Chi tiết hóa đơn');
+    receiptDetailSheet.columns = [
+      { header: 'Mã giao dịch', key: 'id', width: 15 },
+      { header: 'Ngày', key: 'date', width: 14 },
+      { header: 'STT', key: 'index', width: 9 },
+      { header: 'Tên món/nội dung', key: 'name', width: 38 },
+      { header: 'Thành tiền', key: 'amount', width: 20 },
+      { header: 'Tiền tệ', key: 'currency', width: 12 },
+      { header: 'Ghi chú', key: 'note', width: 32 },
+    ];
+    receiptDetailSheet.addRows(
+      data.rows.flatMap((row) =>
+        row.receiptItems.map((item, index) => ({
+          id: row.id,
+          date: row.date,
+          index: index + 1,
+          name: safeSpreadsheetText(item.name),
+          amount: item.amount,
+          currency: row.originalCurrency,
+          note: safeSpreadsheetText(row.note),
+        })),
+      ),
+    );
+    receiptDetailSheet.getColumn('date').numFmt = 'dd/mm/yyyy';
+    receiptDetailSheet.getColumn('amount').numFmt = '#,##0.00';
+
     const analysis = analyzeReportRows(data.rows);
-    const categorySheet = workbook.addWorksheet('Chi theo danh muc');
+    const categorySheet = workbook.addWorksheet('Danh mục');
     categorySheet.columns = [
       { header: 'Danh mục', key: 'category', width: 28 },
       { header: 'Tổng chi', key: 'amount', width: 20 },
       { header: 'Tỷ trọng (%)', key: 'percent', width: 16 },
       { header: 'Số giao dịch', key: 'count', width: 16 },
     ];
-    categorySheet.addRows(analysis.categories);
-    categorySheet.getColumn('amount').numFmt = '#,##0.00';
+    categorySheet.addRows(
+      analysis.categories.map((row) => ({
+        ...row,
+        category: safeSpreadsheetText(row.category),
+      })),
+    );
+    categorySheet.getColumn('amount').numFmt = moneyFormat;
     categorySheet.getColumn('percent').numFmt = '0.0';
-    const monthlySheet = workbook.addWorksheet('Thu chi theo thang');
+    const monthlySheet = workbook.addWorksheet('Thu chi theo kỳ');
     monthlySheet.columns = [
       { header: 'Tháng', key: 'month', width: 16 },
       { header: 'Tổng thu', key: 'income', width: 20 },
@@ -694,10 +959,10 @@ export class ReportsService {
     ];
     monthlySheet.addRows(analysis.months);
     ['income', 'expense', 'net'].forEach((key) => {
-      monthlySheet.getColumn(key).numFmt = '#,##0.00';
+      monthlySheet.getColumn(key).numFmt = moneyFormat;
     });
 
-    const walletSheet = workbook.addWorksheet('Vi');
+    const walletSheet = workbook.addWorksheet('Ví');
     walletSheet.columns = [
       { header: 'Tên ví', key: 'name', width: 24 },
       { header: 'Loại ví', key: 'type', width: 16 },
@@ -706,24 +971,54 @@ export class ReportsService {
     ];
     walletSheet.addRows(
       data.wallets.map((wallet) => ({
-        name: wallet.name,
-        type: wallet.wallet_type,
+        name: safeSpreadsheetText(wallet.name),
+        type: safeSpreadsheetText(wallet.wallet_type),
         currency: wallet.currency,
         balance: Number(wallet.balance ?? 0),
       })),
     );
-    walletSheet.getRow(1).font = { bold: true };
     walletSheet.getColumn('balance').numFmt = '#,##0.00';
-    workbook.eachSheet((sheet) => {
-      sheet.views = [{ state: 'frozen', ySplit: 1 }];
-      sheet.getRow(1).font = { bold: true };
-      sheet.getRow(1).height = 26;
-      if (sheet !== summarySheet)
-        sheet.autoFilter = {
-          from: { row: 1, column: 1 },
-          to: { row: Math.max(1, sheet.rowCount), column: sheet.columnCount },
-        };
-    });
+
+    const explanationSheet = workbook.addWorksheet('Giải thích');
+    explanationSheet.columns = [
+      { header: 'Nội dung', key: 'topic', width: 32 },
+      { header: 'Giải thích', key: 'explanation', width: 100 },
+    ];
+    explanationSheet.addRows([
+      { topic: 'Phạm vi số liệu', explanation: REPORT_METHODOLOGY },
+      {
+        topic: 'Số tiền gốc và quy đổi',
+        explanation:
+          'Số tiền gốc dùng tiền tệ của giao dịch/ví. Số tiền quy đổi dùng tiền tệ báo cáo để có thể cộng tổng.',
+      },
+      {
+        topic: 'Hóa đơn',
+        explanation:
+          'Một dòng tương ứng một giao dịch có ảnh hoặc có chi tiết hóa đơn. Tổng các món được đối chiếu với tổng giao dịch gốc.',
+      },
+      {
+        topic: 'Chi tiết hóa đơn',
+        explanation:
+          'Chỉ xuất tên và thành tiền đã được lưu. Số lượng, đơn giá, thuế, phí, giảm giá và tên cửa hàng không được suy đoán khi dữ liệu nguồn chưa có.',
+      },
+      {
+        topic: 'Chênh lệch hóa đơn',
+        explanation:
+          'Chênh lệch = tổng các món đã đọc - tổng giao dịch. Chênh lệch khác 0 cần được người dùng kiểm tra lại ảnh và giao dịch.',
+      },
+      {
+        topic: 'Số dư ví',
+        explanation:
+          'Số dư tại sheet Ví là số dư hiện tại khi tạo báo cáo, không phải số dư cuối kỳ.',
+      },
+      {
+        topic: 'Dữ liệu trống',
+        explanation:
+          'Sheet vẫn được giữ nguyên tiêu đề để người nhận biết dữ liệu nào không phát sinh trong kỳ.',
+      },
+    ]);
+
+    workbook.eachSheet((sheet) => styleSheet(sheet, sheet !== summarySheet));
     summarySheet.getColumn('value').width = 85;
     summarySheet.getColumn('value').alignment = {
       wrapText: true,
@@ -744,7 +1039,7 @@ export class ReportsService {
   private async exportPdf(
     data: Awaited<ReturnType<ReportsService['buildReportData']>>,
   ) {
-    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
     const chunks: Buffer[] = [];
     const regularFont = 'C:/Windows/Fonts/arial.ttf';
     const boldFont = 'C:/Windows/Fonts/arialbd.ttf';
@@ -767,6 +1062,28 @@ export class ReportsService {
       if (existsSync(regularFont)) {
         doc.font('AppRegular');
       }
+    };
+    const money = (amount: number, currency: string = data.displayCurrency) =>
+      `${amount.toLocaleString('vi-VN', {
+        maximumFractionDigits: currency === 'VND' ? 0 : 2,
+      })} ${currency}`;
+    const pageBottom = () => doc.page.height - 55;
+    const ensureSpace = (height: number, title?: string) => {
+      if (doc.y + height <= pageBottom()) return;
+      doc.addPage();
+      if (title) {
+        useBold();
+        doc.fontSize(11).fillColor('#7A3E00').text(title);
+        useRegular();
+        doc.fillColor('#000000').moveDown(0.3);
+      }
+    };
+    const sectionTitle = (title: string) => {
+      ensureSpace(38);
+      useBold();
+      doc.fontSize(12).fillColor('#7A3E00').text(title);
+      useRegular();
+      doc.fillColor('#000000').moveDown(0.35);
     };
 
     doc.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -796,29 +1113,66 @@ export class ReportsService {
     doc
       .fontSize(10)
       .text(
-        `Tổng thu: ${data.summary.income.toLocaleString('vi-VN')} ${data.displayCurrency}`,
+        `Tổng thu: ${money(data.summary.income)}`,
       );
-    doc.text(
-      `Tổng chi: ${data.summary.expense.toLocaleString('vi-VN')} ${data.displayCurrency}`,
-    );
-    doc.text(
-      `Chênh lệch thu – chi: ${data.summary.net.toLocaleString('vi-VN')} ${data.displayCurrency}`,
-    );
+    doc.text(`Tổng chi: ${money(data.summary.expense)}`);
+    doc.text(`Chênh lệch thu – chi: ${money(data.summary.net)}`);
     doc.text(`Số giao dịch: ${data.summary.transactionCount}`);
+    doc.text(
+      `Hóa đơn: ${data.summary.receiptCount} | Dòng chi tiết: ${data.summary.receiptItemCount}`,
+    );
     doc.moveDown();
 
-    useBold();
-    doc.fontSize(12).text('Giao dịch trong kỳ (đầy đủ, theo ngày tăng dần)');
-    useRegular();
-    doc.moveDown(0.3);
+    sectionTitle('Cách tính và phạm vi');
+    doc.fontSize(9).text(REPORT_METHODOLOGY, { align: 'justify' });
+
+    const analysis = analyzeReportRows(data.rows);
+    sectionTitle('Danh mục chi nhiều nhất');
+    if (!analysis.categories.length) {
+      doc.fontSize(9).text('Không có khoản chi trong khoảng đã chọn.');
+    } else {
+      analysis.categories.slice(0, 8).forEach((row, index) => {
+        ensureSpace(22, 'Danh mục chi nhiều nhất (tiếp)');
+        doc
+          .fontSize(9)
+          .text(
+            `${index + 1}. ${row.category}: ${money(row.amount)} (${row.percent.toFixed(1)}%) · ${row.count} giao dịch`,
+          );
+      });
+    }
+
+    sectionTitle('Hóa đơn trong kỳ');
+    const receiptRows = data.rows.filter(
+      (row) => row.hasReceiptImage || row.receiptItems.length,
+    );
+    if (!receiptRows.length) {
+      doc.fontSize(9).text('Không có hóa đơn được lưu trong khoảng đã chọn.');
+    } else {
+      receiptRows.forEach((row) => {
+        ensureSpace(42, 'Hóa đơn trong kỳ (tiếp)');
+        doc
+          .fontSize(9)
+          .text(
+            `#${row.id} · ${formatDate(row.date)} · ${row.category} · ${money(row.originalAmount, row.originalCurrency)}`,
+          );
+        doc
+          .fontSize(8)
+          .fillColor('#666666')
+          .text(
+            `${row.receiptStatus}; ${row.receiptItems.length} dòng chi tiết${row.receiptItems.length ? `; tổng đã đọc ${money(row.receiptItemTotal, row.originalCurrency)}` : ''}`,
+          );
+        doc.fillColor('#000000');
+      });
+    }
+
+    sectionTitle('Giao dịch trong kỳ (theo ngày tăng dần)');
 
     data.rows.forEach((row) => {
+      ensureSpace(48, 'Giao dịch trong kỳ (tiếp)');
       doc
         .fontSize(9)
         .text(
-          `${formatDate(row.date)} | ${row.type} | ${row.category} | ${row.wallet} | ${row.amount.toLocaleString(
-            'vi-VN',
-          )} ${row.currency}`,
+          `#${row.id} · ${formatDate(row.date)} · ${row.type} · ${row.category} · ${row.wallet} · ${money(row.amount, row.currency)}`,
         );
       if (row.note || row.tags.length) {
         doc
@@ -830,6 +1184,29 @@ export class ReportsService {
         doc.fillColor('#000000');
       }
     });
+
+    if (!data.rows.length) {
+      doc.fontSize(9).text('Không có giao dịch trong khoảng đã chọn.');
+    }
+
+    const pageRange = doc.bufferedPageRange();
+    for (let index = 0; index < pageRange.count; index += 1) {
+      doc.switchToPage(pageRange.start + index);
+      useRegular();
+      const bottomMargin = doc.page.margins.bottom;
+      doc.page.margins.bottom = 0;
+      doc
+        .fontSize(8)
+        .fillColor('#777777')
+        .text(
+          `QuanLyChiTieu · Trang ${index + 1}/${pageRange.count}`,
+          40,
+          doc.page.height - 32,
+          { align: 'center', width: doc.page.width - 80, lineBreak: false },
+        );
+      doc.page.margins.bottom = bottomMargin;
+    }
+    doc.fillColor('#000000');
 
     doc.end();
     const buffer = await done;
