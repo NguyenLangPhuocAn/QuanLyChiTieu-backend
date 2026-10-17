@@ -40,7 +40,10 @@ const nodemailer = nodemailerModule as unknown as {
 };
 import { CurrencyService } from '../currency/currency.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { isNormalCashFlow } from '../common/finance/cash-flow-classification';
+import {
+  getCashFlowType,
+  isNormalCashFlow,
+} from '../common/finance/cash-flow-classification';
 import {
   buildEmailInlineAttachments,
   buildReportEmailHtml,
@@ -79,6 +82,7 @@ type ReportTransaction = {
   receipt_image?: string | null;
   receipt_items?: Prisma.JsonValue | null;
   transaction_date: Date;
+  created_at?: Date | null;
 };
 
 type ReceiptItem = {
@@ -105,6 +109,11 @@ type ReportRow = {
   receiptItemTotal: number;
   receiptDifference: number;
   receiptStatus: string;
+  cashFlowGroup: string;
+  walletId: number | null;
+  categoryId: number | null;
+  createdAt: Date | null;
+  receiptImage: string;
 };
 
 type ReportCategoryMeta = {
@@ -287,6 +296,7 @@ export class ReportsService {
     role: string | null,
     period: ReportPeriod,
     requestedRange: ReportDateRange = {},
+    includeAll = false,
   ) {
     if (role !== 'PREMIUM' && role !== 'ADMIN') {
       throw new ForbiddenException(
@@ -354,6 +364,7 @@ export class ReportsService {
             receipt_image: true,
             receipt_items: true,
             transaction_date: true,
+            created_at: true,
           },
           orderBy: { transaction_date: 'asc' },
         })
@@ -384,7 +395,7 @@ export class ReportsService {
         ? categoryMap.get(transaction.category_id)
         : null;
 
-      return isNormalCashFlow(category);
+      return includeAll || isNormalCashFlow(category);
     });
     const tagRows = reportTransactions.length
       ? await this.prisma.$queryRaw<
@@ -427,7 +438,9 @@ export class ReportsService {
       const originalCurrency = this.currencyService.normalizeCurrency(
         transaction.currency ?? wallet?.currency ?? 'VND',
       );
-      const receiptItems = this.normalizeReceiptItems(transaction.receipt_items);
+      const receiptItems = this.normalizeReceiptItems(
+        transaction.receipt_items,
+      );
       const receiptItemTotal = receiptItems.reduce(
         (sum, item) => sum + item.amount,
         0,
@@ -442,10 +455,12 @@ export class ReportsService {
           ? 'Có ảnh, chưa có chi tiết món'
           : 'Không có hóa đơn';
 
-      if (signedAmount.greaterThanOrEqualTo(0)) {
-        income += amount;
-      } else {
-        expense += amount;
+      if (isNormalCashFlow(category)) {
+        if (signedAmount.greaterThanOrEqualTo(0)) {
+          income += amount;
+        } else {
+          expense += amount;
+        }
       }
 
       rows.push({
@@ -469,6 +484,11 @@ export class ReportsService {
         receiptItemTotal,
         receiptDifference,
         receiptStatus,
+        cashFlowGroup: getCashFlowType(category),
+        walletId: transaction.wallet_id,
+        categoryId: transaction.category_id,
+        createdAt: transaction.created_at ?? null,
+        receiptImage: transaction.receipt_image ?? '',
       });
     }
 
@@ -507,8 +527,11 @@ export class ReportsService {
       role,
       period,
       requestedRange,
+      true,
     );
-    const analysis = analyzeReportRows(data.rows);
+    const analysis = analyzeReportRows(
+      data.rows.filter((row) => row.cashFlowGroup === 'normal'),
+    );
 
     return {
       period: data.period,
@@ -532,9 +555,13 @@ export class ReportsService {
         'Danh mục',
         'Thu chi theo kỳ',
         'Ví',
-        'Giải thích',
+        'Chuyển ví',
+        'Tiết kiệm',
+        'Vay nợ',
+        'Thanh toán vay nợ',
       ],
-      methodology: REPORT_METHODOLOGY,
+      methodology:
+        'Xuất đầy đủ các loại giao dịch trong khoảng thời gian và ví đã chọn. Tổng thu/chi chỉ tính các khoản thông thường.',
     };
   }
 
@@ -550,10 +577,14 @@ export class ReportsService {
       role,
       period,
       requestedRange,
+      format === 'excel',
     );
 
     if (format === 'excel') {
-      return this.exportExcel(data);
+      return this.exportExcel(
+        data,
+        await this.buildAdditionalExcelData(userId, data),
+      );
     }
 
     return this.exportPdf(data);
@@ -608,10 +639,18 @@ export class ReportsService {
       role,
       period,
       requestedRange,
+      true,
     );
-    const report = await this.exportExcel(data);
+    const report = await this.exportExcel(
+      data,
+      await this.buildAdditionalExcelData(userId, data),
+    );
     const rangeLabel = `${formatDate(data.range.start)} - ${formatDate(new Date(data.range.end.getTime() - 1))}`;
-    const analysis = analyzeReportRows(data.rows);
+    const analysis = analyzeReportRows(
+      data.rows.filter(
+        (row) => !row.cashFlowGroup || row.cashFlowGroup === 'normal',
+      ),
+    );
     const money = (amount: number) =>
       `${amount.toLocaleString('vi-VN', { maximumFractionDigits: data.displayCurrency === 'VND' ? 0 : 2 })} ${data.displayCurrency}`;
     const topCategories = analysis.categories
@@ -620,7 +659,8 @@ export class ReportsService {
         (row) =>
           `${row.category}: ${money(row.amount)} (${row.percent.toFixed(1)}%), ${row.count} giao dịch`,
       );
-    const methodology = REPORT_METHODOLOGY;
+    const methodology =
+      'File Excel gồm tất cả loại giao dịch trong phạm vi đã chọn. Tổng thu/chi chỉ tính các khoản thông thường.';
     const html = buildReportEmailHtml({
       recipientName: data.user.full_name || data.user.email,
       periodLabel: periodLabels[period],
@@ -722,8 +762,86 @@ export class ReportsService {
     return { delivered: false, accepted: true, devOnly: false };
   }
 
+  private async buildAdditionalExcelData(
+    userId: number,
+    data: Awaited<ReturnType<ReportsService['buildReportData']>>,
+  ) {
+    const walletIds = data.wallets.map((wallet) => wallet.id);
+    const transactionIds = data.rows.map((row) => row.id);
+    const date = { gte: data.range.start, lt: data.range.end };
+    const [transfers, savings, loans, payments] = await Promise.all([
+      this.prisma.wallet_transfers.findMany({
+        where: {
+          user_id: userId,
+          deleted_at: null,
+          transfer_date: date,
+          OR: [
+            { source_wallet_id: { in: walletIds } },
+            { destination_wallet_id: { in: walletIds } },
+          ],
+        },
+        include: {
+          source_wallet: true,
+          destination_wallet: true,
+          goal_entry: true,
+        },
+        orderBy: [{ transfer_date: 'asc' }, { id: 'asc' }],
+      }),
+      this.prisma.savings_goal_entries.findMany({
+        where: {
+          deleted_at: null,
+          entry_date: date,
+          goal: { user_id: userId },
+          OR: [
+            { goal: { wallet_id: { in: walletIds } } },
+            {
+              transfer: {
+                OR: [
+                  { source_wallet_id: { in: walletIds } },
+                  { destination_wallet_id: { in: walletIds } },
+                ],
+              },
+            },
+          ],
+        },
+        include: { goal: { include: { wallet: true } } },
+        orderBy: [{ entry_date: 'asc' }, { id: 'asc' }],
+      }),
+      this.prisma.loan_debts.findMany({
+        where: {
+          user_id: userId,
+          deleted_at: null,
+          OR: [
+            { opening_transaction_id: { in: transactionIds } },
+            {
+              payments: {
+                some: {
+                  deleted_at: null,
+                  transaction_id: { in: transactionIds },
+                },
+              },
+            },
+          ],
+        },
+        orderBy: { id: 'asc' },
+      }),
+      this.prisma.loan_debt_payments.findMany({
+        where: {
+          deleted_at: null,
+          payment_date: date,
+          transaction_id: { in: transactionIds },
+          loan_debt: { user_id: userId, deleted_at: null },
+        },
+        include: { loan_debt: true },
+        orderBy: [{ payment_date: 'asc' }, { id: 'asc' }],
+      }),
+    ]);
+    return { transfers, savings, loans, payments };
+  }
+
   private async exportExcel(
     data: Awaited<ReturnType<ReportsService['buildReportData']>>,
+    extra?: Awaited<ReturnType<ReportsService['buildAdditionalExcelData']>>,
   ) {
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'QuanLyChiTieu';
@@ -795,31 +913,21 @@ export class ReportsService {
         value: formatDate(new Date(data.range.end.getTime() - 1)),
       },
       { label: 'Tiền tệ', value: data.displayCurrency },
-      { label: 'Tổng thu', value: data.summary.income },
-      { label: 'Tổng chi', value: data.summary.expense },
+      { label: 'Tổng thu thông thường', value: data.summary.income },
+      { label: 'Tổng chi thông thường', value: data.summary.expense },
       { label: 'Chênh lệch thu – chi', value: data.summary.net },
-      { label: 'Số giao dịch', value: data.summary.transactionCount },
+      {
+        label: 'Số giao dịch thu/chi/vay nợ',
+        value: data.summary.transactionCount,
+      },
       { label: 'Số hóa đơn', value: data.summary.receiptCount },
       {
         label: 'Số dòng chi tiết hóa đơn',
         value: data.summary.receiptItemCount,
       },
       { label: 'Thời điểm tạo', value: new Date() },
-      {
-        label: 'Phạm vi',
-        value:
-          'Thu/chi thông thường; không gồm chuyển nội bộ, gửi/rút tiết kiệm và vay/nợ.',
-      },
-      {
-        label: 'Quy đổi',
-        value:
-          'Ưu tiên số tiền quy đổi đã lưu; nếu chưa có dùng tỷ giá khi tạo báo cáo.',
-      },
-      {
-        label: 'Lưu ý số dư',
-        value:
-          'Số dư trong sheet Ví là hiện tại, không phải số dư cuối kỳ báo cáo.',
-      },
+      { label: 'Số lần chuyển ví', value: extra?.transfers.length ?? 0 },
+      { label: 'Số bút toán tiết kiệm', value: extra?.savings.length ?? 0 },
     ]);
     [8, 9, 10].forEach((row) => {
       summarySheet.getCell(row, 2).numFmt = moneyFormat;
@@ -842,6 +950,12 @@ export class ReportsService {
       { header: 'Hashtag', key: 'tags', width: 28 },
       { header: 'Ghi chú', key: 'note', width: 36 },
       { header: 'Trạng thái hóa đơn', key: 'receiptStatus', width: 31 },
+      { header: 'Nhóm giao dịch', key: 'group', width: 24 },
+      { header: 'Mã ví', key: 'walletId', width: 12 },
+      { header: 'Mã danh mục', key: 'categoryId', width: 14 },
+      { header: 'Ngày tạo', key: 'createdAt', width: 22 },
+      { header: 'Ảnh hóa đơn', key: 'receiptImage', width: 45 },
+      { header: 'Biến động gốc (+/−)', key: 'signedAmount', width: 22 },
     ];
     transactionSheet.addRows(
       data.rows.map((row) => ({
@@ -856,14 +970,26 @@ export class ReportsService {
         exchangeRateUsed: row.exchangeRateUsed,
         amount: row.amount,
         currency: row.currency,
-        tags: safeSpreadsheetText(
-          row.tags.map((tag) => `#${tag}`).join(' '),
-        ),
+        tags: safeSpreadsheetText(row.tags.map((tag) => `#${tag}`).join(' ')),
         note: safeSpreadsheetText(row.note),
         receiptStatus: row.receiptStatus,
+        group:
+          row.cashFlowGroup === 'loan_debt'
+            ? 'Vay/nợ'
+            : row.cashFlowGroup === 'saving_transfer'
+              ? 'Tiết kiệm/chuyển ví'
+              : 'Thu/chi thông thường',
+        walletId: row.walletId,
+        categoryId: row.categoryId,
+        createdAt: row.createdAt,
+        receiptImage: safeSpreadsheetText(row.receiptImage),
+        signedAmount:
+          row.type === 'Chi' ? -row.originalAmount : row.originalAmount,
       })),
     );
-    transactionSheet.getColumn('date').numFmt = 'dd/mm/yyyy';
+    transactionSheet.getColumn('date').numFmt = 'dd/mm/yyyy hh:mm:ss';
+    transactionSheet.getColumn('createdAt').numFmt = 'dd/mm/yyyy hh:mm:ss';
+    transactionSheet.getColumn('signedAmount').numFmt = '#,##0.00';
     transactionSheet.getColumn('originalAmount').numFmt = '#,##0.00';
     transactionSheet.getColumn('exchangeRateUsed').numFmt = '#,##0.########';
     transactionSheet.getColumn('amount').numFmt = moneyFormat;
@@ -933,7 +1059,11 @@ export class ReportsService {
     receiptDetailSheet.getColumn('date').numFmt = 'dd/mm/yyyy';
     receiptDetailSheet.getColumn('amount').numFmt = '#,##0.00';
 
-    const analysis = analyzeReportRows(data.rows);
+    const analysis = analyzeReportRows(
+      data.rows.filter(
+        (row) => !row.cashFlowGroup || row.cashFlowGroup === 'normal',
+      ),
+    );
     const categorySheet = workbook.addWorksheet('Danh mục');
     categorySheet.columns = [
       { header: 'Danh mục', key: 'category', width: 28 },
@@ -979,44 +1109,201 @@ export class ReportsService {
     );
     walletSheet.getColumn('balance').numFmt = '#,##0.00';
 
-    const explanationSheet = workbook.addWorksheet('Giải thích');
-    explanationSheet.columns = [
-      { header: 'Nội dung', key: 'topic', width: 32 },
-      { header: 'Giải thích', key: 'explanation', width: 100 },
-    ];
-    explanationSheet.addRows([
-      { topic: 'Phạm vi số liệu', explanation: REPORT_METHODOLOGY },
-      {
-        topic: 'Số tiền gốc và quy đổi',
-        explanation:
-          'Số tiền gốc dùng tiền tệ của giao dịch/ví. Số tiền quy đổi dùng tiền tệ báo cáo để có thể cộng tổng.',
-      },
-      {
-        topic: 'Hóa đơn',
-        explanation:
-          'Một dòng tương ứng một giao dịch có ảnh hoặc có chi tiết hóa đơn. Tổng các món được đối chiếu với tổng giao dịch gốc.',
-      },
-      {
-        topic: 'Chi tiết hóa đơn',
-        explanation:
-          'Chỉ xuất tên và thành tiền đã được lưu. Số lượng, đơn giá, thuế, phí, giảm giá và tên cửa hàng không được suy đoán khi dữ liệu nguồn chưa có.',
-      },
-      {
-        topic: 'Chênh lệch hóa đơn',
-        explanation:
-          'Chênh lệch = tổng các món đã đọc - tổng giao dịch. Chênh lệch khác 0 cần được người dùng kiểm tra lại ảnh và giao dịch.',
-      },
-      {
-        topic: 'Số dư ví',
-        explanation:
-          'Số dư tại sheet Ví là số dư hiện tại khi tạo báo cáo, không phải số dư cuối kỳ.',
-      },
-      {
-        topic: 'Dữ liệu trống',
-        explanation:
-          'Sheet vẫn được giữ nguyên tiêu đề để người nhận biết dữ liệu nào không phát sinh trong kỳ.',
-      },
-    ]);
+    const addDetailSheet = (
+      name: string,
+      columns: Array<{
+        header: string;
+        key: string;
+        width: number;
+        format?: string;
+      }>,
+      rows: Array<Record<string, string | number | Date | null | undefined>>,
+    ) => {
+      const sheet = workbook.addWorksheet(name);
+      sheet.columns = columns;
+      sheet.addRows(
+        rows.map((row) =>
+          Object.fromEntries(
+            Object.entries(row).map(([key, value]) => [
+              key,
+              typeof value === 'string' ? safeSpreadsheetText(value) : value,
+            ]),
+          ),
+        ),
+      );
+      columns.forEach((column) => {
+        if (column.format) sheet.getColumn(column.key).numFmt = column.format;
+      });
+    };
+    const dateFormat = 'dd/mm/yyyy hh:mm:ss';
+    const savingsType = (type: string) =>
+      ({
+        CONTRIBUTION: 'Gửi tiết kiệm',
+        WITHDRAWAL: 'Rút tiết kiệm',
+        ADJUSTMENT: 'Điều chỉnh tiết kiệm',
+      })[type] ?? type;
+    addDetailSheet(
+      'Chuyển ví',
+      [
+        { header: 'Mã chuyển', key: 'id', width: 14 },
+        { header: 'Ngày chuyển', key: 'date', width: 22, format: dateFormat },
+        { header: 'Loại', key: 'type', width: 24 },
+        { header: 'Mã ví nguồn', key: 'sourceId', width: 14 },
+        { header: 'Ví nguồn', key: 'source', width: 24 },
+        { header: 'Mã ví nhận', key: 'destinationId', width: 14 },
+        { header: 'Ví nhận', key: 'destination', width: 24 },
+        { header: 'Số tiền', key: 'amount', width: 20, format: '#,##0.00' },
+        { header: 'Tiền tệ', key: 'currency', width: 12 },
+        { header: 'Mã mục tiêu tiết kiệm', key: 'goalId', width: 22 },
+        { header: 'Ghi chú', key: 'note', width: 40 },
+        { header: 'Ngày tạo', key: 'createdAt', width: 22, format: dateFormat },
+      ],
+      (extra?.transfers ?? []).map((row) => ({
+        id: row.id,
+        date: row.transfer_date,
+        type: row.goal_entry ? savingsType(row.goal_entry.type) : 'Chuyển ví',
+        sourceId: row.source_wallet_id,
+        source: row.source_wallet.name,
+        destinationId: row.destination_wallet_id,
+        destination: row.destination_wallet.name,
+        amount: Number(row.amount),
+        currency: row.currency,
+        goalId: row.goal_entry?.goal_id,
+        note: row.note,
+        createdAt: row.created_at,
+      })),
+    );
+    addDetailSheet(
+      'Tiết kiệm',
+      [
+        { header: 'Mã bút toán', key: 'id', width: 15 },
+        {
+          header: 'Ngày giao dịch',
+          key: 'date',
+          width: 22,
+          format: dateFormat,
+        },
+        { header: 'Loại', key: 'type', width: 25 },
+        { header: 'Mã mục tiêu', key: 'goalId', width: 15 },
+        { header: 'Mục tiêu', key: 'goal', width: 28 },
+        { header: 'Ví tiết kiệm', key: 'wallet', width: 24 },
+        { header: 'Số tiền', key: 'amount', width: 20, format: '#,##0.00' },
+        { header: 'Tiền tệ', key: 'currency', width: 12 },
+        { header: 'Mã chuyển ví liên kết', key: 'transferId', width: 22 },
+        {
+          header: 'Mục tiêu số tiền',
+          key: 'target',
+          width: 22,
+          format: '#,##0.00',
+        },
+        {
+          header: 'Hạn mục tiêu',
+          key: 'targetDate',
+          width: 22,
+          format: dateFormat,
+        },
+        { header: 'Trạng thái mục tiêu hiện tại', key: 'status', width: 30 },
+        { header: 'Ghi chú giao dịch', key: 'note', width: 40 },
+        { header: 'Ghi chú mục tiêu', key: 'goalNote', width: 40 },
+        { header: 'Ngày tạo', key: 'createdAt', width: 22, format: dateFormat },
+      ],
+      (extra?.savings ?? []).map((row) => ({
+        id: row.id,
+        date: row.entry_date,
+        type: savingsType(row.type),
+        goalId: row.goal_id,
+        goal: row.goal.name,
+        wallet: row.goal.wallet.name,
+        amount: Number(row.amount),
+        currency: row.goal.wallet.currency,
+        transferId: row.transfer_id,
+        target: Number(row.goal.target_amount),
+        targetDate: row.goal.target_date,
+        status: {
+          ACTIVE: 'Đang thực hiện',
+          COMPLETED: 'Hoàn thành',
+          CANCELLED: 'Đã hủy',
+        }[row.goal.status],
+        note: row.note,
+        goalNote: row.goal.note,
+        createdAt: row.created_at,
+      })),
+    );
+    addDetailSheet(
+      'Vay nợ',
+      [
+        { header: 'Mã khoản vay/nợ', key: 'id', width: 18 },
+        { header: 'Loại', key: 'type', width: 16 },
+        { header: 'Người liên quan', key: 'person', width: 28 },
+        { header: 'Tiền gốc', key: 'principal', width: 22, format: '#,##0.00' },
+        { header: 'Tiền tệ', key: 'currency', width: 12 },
+        {
+          header: 'Ngày đến hạn',
+          key: 'dueDate',
+          width: 22,
+          format: dateFormat,
+        },
+        { header: 'Trạng thái hiện tại', key: 'status', width: 24 },
+        { header: 'Mã ví mở khoản', key: 'walletId', width: 18 },
+        { header: 'Mã giao dịch gốc', key: 'transactionId', width: 20 },
+        { header: 'Ghi chú', key: 'note', width: 40 },
+        { header: 'Ngày tạo', key: 'createdAt', width: 22, format: dateFormat },
+        {
+          header: 'Cập nhật cuối',
+          key: 'updatedAt',
+          width: 22,
+          format: dateFormat,
+        },
+      ],
+      (extra?.loans ?? []).map((row) => ({
+        id: row.id,
+        type: row.type === 'BORROWED' ? 'Đi vay' : 'Cho vay',
+        person: row.person_name,
+        principal: Number(row.principal_amount),
+        currency: row.currency,
+        dueDate: row.due_date,
+        status: row.status === 'PAID' ? 'Đã tất toán' : 'Chưa tất toán',
+        walletId: row.opening_wallet_id,
+        transactionId: row.opening_transaction_id,
+        note: row.note,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      })),
+    );
+    addDetailSheet(
+      'Thanh toán vay nợ',
+      [
+        { header: 'Mã thanh toán', key: 'id', width: 17 },
+        {
+          header: 'Ngày thanh toán',
+          key: 'date',
+          width: 22,
+          format: dateFormat,
+        },
+        { header: 'Loại', key: 'type', width: 18 },
+        { header: 'Mã khoản vay/nợ', key: 'loanId', width: 18 },
+        { header: 'Người liên quan', key: 'person', width: 28 },
+        { header: 'Mã giao dịch', key: 'transactionId', width: 17 },
+        { header: 'Mã ví', key: 'walletId', width: 12 },
+        { header: 'Số tiền', key: 'amount', width: 22, format: '#,##0.00' },
+        { header: 'Tiền tệ khoản vay', key: 'currency', width: 20 },
+        { header: 'Ghi chú', key: 'note', width: 40 },
+        { header: 'Ngày tạo', key: 'createdAt', width: 22, format: dateFormat },
+      ],
+      (extra?.payments ?? []).map((row) => ({
+        id: row.id,
+        date: row.payment_date,
+        type: row.loan_debt.type === 'BORROWED' ? 'Trả nợ' : 'Thu hồi nợ',
+        loanId: row.loan_debt_id,
+        person: row.loan_debt.person_name,
+        transactionId: row.transaction_id,
+        walletId: row.wallet_id,
+        amount: Number(row.amount),
+        currency: row.loan_debt.currency,
+        note: row.note,
+        createdAt: row.created_at,
+      })),
+    );
 
     workbook.eachSheet((sheet) => styleSheet(sheet, sheet !== summarySheet));
     summarySheet.getColumn('value').width = 85;
@@ -1110,11 +1397,7 @@ export class ReportsService {
     useBold();
     doc.fontSize(12).text('Tổng quan');
     useRegular();
-    doc
-      .fontSize(10)
-      .text(
-        `Tổng thu: ${money(data.summary.income)}`,
-      );
+    doc.fontSize(10).text(`Tổng thu: ${money(data.summary.income)}`);
     doc.text(`Tổng chi: ${money(data.summary.expense)}`);
     doc.text(`Chênh lệch thu – chi: ${money(data.summary.net)}`);
     doc.text(`Số giao dịch: ${data.summary.transactionCount}`);

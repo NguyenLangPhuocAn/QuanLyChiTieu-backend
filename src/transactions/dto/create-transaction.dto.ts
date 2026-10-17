@@ -67,4 +67,14 @@ export class CreateTransactionDto {
     message: 'Mã nguồn giao dịch chưa hợp lệ',
   })
   source_ref?: string;
+
+  /**
+   * Khóa do thiết bị tạo trước lần gửi đầu tiên. Khi mạng chập chờn, gửi lại
+   * cùng khóa và cùng nội dung sẽ trả giao dịch đã tạo thay vì ghi thêm lần hai.
+   */
+  @IsOptional()
+  @Matches(/^[a-zA-Z0-9_-]{16,64}$/, {
+    message: 'Mã yêu cầu giao dịch chưa hợp lệ',
+  })
+  client_request_id?: string;
 }

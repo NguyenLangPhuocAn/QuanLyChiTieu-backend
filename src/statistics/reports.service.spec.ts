@@ -44,7 +44,15 @@ type ReportsServiceTestAccess = Pick<ReportsService, 'sendExcelReport'> & {
     userId: number,
     role: string | null,
     period: StatisticsPeriod,
+    range?: { walletId?: number; dateFrom?: string; dateTo?: string },
+    includeAll?: boolean,
   ): Promise<ReportData>;
+  buildAdditionalExcelData(): Promise<{
+    transfers: never[];
+    savings: never[];
+    loans: never[];
+    payments: never[];
+  }>;
   exportExcel(data: ReportData): Promise<ReportFile>;
   exportPdf(data: ReportData): Promise<ReportFile>;
   sendMail(
@@ -197,6 +205,159 @@ describe('ReportsService', () => {
         select: expect.objectContaining({ cash_flow_group: true }),
       }),
     );
+    const complete = await (
+      service as unknown as ReportsServiceTestAccess
+    ).buildReportData(1, 'PREMIUM', 'month', {}, true);
+    expect(complete.rows.map((row) => row.id)).toEqual([1, 2, 3, 4]);
+    expect(complete.summary).toMatchObject({
+      income: 5000000,
+      expense: 1000000,
+      transactionCount: 4,
+    });
+    const report = await (
+      service as unknown as ReportsServiceTestAccess
+    ).exportExcel(complete);
+    const book = new ExcelJS.Workbook();
+    await book.xlsx.load(Buffer.from(report.base64, 'base64') as never);
+    expect(book.getWorksheet('Giao dịch')?.rowCount).toBe(5);
+    expect(book.getWorksheet('Giao dịch')?.getCell('O4').value).toBe('Vay/nợ');
+    expect(book.getWorksheet('Thu chi theo kỳ')?.getCell('B2').value).toBe(
+      5000000,
+    );
+    expect(book.getWorksheet('Thu chi theo kỳ')?.getCell('C2').value).toBe(
+      1000000,
+    );
+  });
+
+  it('exports transfers and every savings entry kind with user, wallet and date boundaries', async () => {
+    const date = new Date(2026, 8, 10, 9, 30);
+    const wallet = {
+      id: 1,
+      name: 'Tiền mặt',
+      wallet_type: 'CASH',
+      currency: 'VND',
+      balance: new Prisma.Decimal(100),
+    };
+    const goal = {
+      id: 2,
+      user_id: 7,
+      name: 'Dự phòng',
+      wallet_id: 2,
+      wallet: { ...wallet, id: 2, name: 'Tiết kiệm' },
+      target_amount: new Prisma.Decimal(1000),
+      target_date: date,
+      status: 'ACTIVE',
+      note: 'Mục tiêu',
+    };
+    const transfer = {
+      id: 10,
+      user_id: 7,
+      source_wallet_id: 2,
+      destination_wallet_id: 1,
+      source_wallet: goal.wallet,
+      destination_wallet: wallet,
+      amount: new Prisma.Decimal(50),
+      currency: 'VND',
+      transfer_date: date,
+      note: '=SUM(A1)',
+      created_at: date,
+      goal_entry: { goal_id: 2, type: 'WITHDRAWAL' },
+    };
+    const prisma = {
+      users: {
+        findUnique: jest.fn().mockResolvedValue({
+          email: 'user@example.com',
+          full_name: 'User',
+          currency_default: 'VND',
+        }),
+      },
+      wallets: { findMany: jest.fn().mockResolvedValue([wallet]) },
+      transactions: { findMany: jest.fn().mockResolvedValue([]) },
+      wallet_transfers: { findMany: jest.fn().mockResolvedValue([transfer]) },
+      savings_goal_entries: {
+        findMany: jest.fn().mockResolvedValue(
+          ['CONTRIBUTION', 'WITHDRAWAL', 'ADJUSTMENT'].map((type, i) => ({
+            id: i + 1,
+            goal_id: 2,
+            goal,
+            type,
+            amount: new Prisma.Decimal(50),
+            entry_date: date,
+            transfer_id: i === 1 ? 10 : null,
+            note: 'Ghi chú riêng',
+            created_at: date,
+          })),
+        ),
+      },
+      loan_debts: { findMany: jest.fn().mockResolvedValue([]) },
+      loan_debt_payments: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const service = new ReportsService(
+      prisma as never,
+      currencyService as never,
+    );
+    const report = await service.exportReport(7, 'PREMIUM', 'custom', 'excel', {
+      walletId: 1,
+      dateFrom: '2026-09-01',
+      dateTo: '2026-09-30',
+    });
+    const book = new ExcelJS.Workbook();
+    await book.xlsx.load(Buffer.from(report.base64, 'base64') as never);
+    expect(book.getWorksheet('Chuyển ví')?.getCell('C2').value).toBe(
+      'Rút tiết kiệm',
+    );
+    expect(book.getWorksheet('Chuyển ví')?.getCell('E2').value).toBe(
+      'Tiết kiệm',
+    );
+    expect(book.getWorksheet('Chuyển ví')?.getCell('G2').value).toBe(
+      'Tiền mặt',
+    );
+    expect(book.getWorksheet('Chuyển ví')?.getCell('K2').value).toBe(
+      "'=SUM(A1)",
+    );
+    expect(book.getWorksheet('Tiết kiệm')?.getColumn(3).values).toEqual(
+      expect.arrayContaining([
+        'Gửi tiết kiệm',
+        'Rút tiết kiệm',
+        'Điều chỉnh tiết kiệm',
+      ]),
+    );
+    expect(book.getWorksheet('Tiết kiệm')?.getCell('M2').value).toBe(
+      'Ghi chú riêng',
+    );
+    expect(book.getWorksheet('Tổng quan')?.getCell('B8').value).toBe(0);
+    expect(book.getWorksheet('Tổng quan')?.getCell('B9').value).toBe(0);
+    expect(prisma.wallet_transfers.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          user_id: 7,
+          deleted_at: null,
+          transfer_date: {
+            gte: new Date(2026, 8, 1),
+            lt: new Date(2026, 9, 1),
+          },
+          OR: [
+            { source_wallet_id: { in: [1] } },
+            { destination_wallet_id: { in: [1] } },
+          ],
+        },
+      }),
+    );
+    expect(prisma.savings_goal_entries.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          goal: { user_id: 7 },
+          deleted_at: null,
+          entry_date: { gte: new Date(2026, 8, 1), lt: new Date(2026, 9, 1) },
+        }),
+      }),
+    );
+    for (const delegate of [prisma.loan_debts, prisma.loan_debt_payments]) {
+      expect(delegate.findMany).toHaveBeenCalled();
+    }
+    await expect(
+      service.exportReport(7, 'BASIC', 'all', 'excel'),
+    ).rejects.toThrow('Premium');
   });
 
   it('sends report email with an HTML body and plain text fallback', async () => {
@@ -229,6 +390,12 @@ describe('ReportsService', () => {
     };
 
     jest.spyOn(service, 'buildReportData').mockResolvedValue(data);
+    jest.spyOn(service, 'buildAdditionalExcelData').mockResolvedValue({
+      transfers: [],
+      savings: [],
+      loans: [],
+      payments: [],
+    });
     jest.spyOn(service, 'exportExcel').mockResolvedValue({
       filename: 'bao-cao.xlsx',
       mimeType:
@@ -309,7 +476,7 @@ describe('ReportsService', () => {
 
     const report = await service.exportExcel(data);
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(Buffer.from(report.base64, 'base64'));
+    await workbook.xlsx.load(Buffer.from(report.base64, 'base64') as never);
 
     expect(workbook.worksheets.map((sheet) => sheet.name)).toEqual([
       'Tổng quan',
@@ -319,14 +486,22 @@ describe('ReportsService', () => {
       'Danh mục',
       'Thu chi theo kỳ',
       'Ví',
-      'Giải thích',
+      'Chuyển ví',
+      'Tiết kiệm',
+      'Vay nợ',
+      'Thanh toán vay nợ',
     ]);
-    expect(workbook.getWorksheet('Giao dịch')?.getCell('M2').value).toBe(
-      "'=HYPERLINK(\"https://example.com\")",
+    expect(workbook.getWorksheet('Giải thích')).toBeUndefined();
+    const labels = workbook.getWorksheet('Tổng quan')?.getColumn(1).values;
+    expect(labels).not.toEqual(
+      expect.arrayContaining(['Phạm vi', 'Quy đổi', 'Lưu ý số dư']),
     );
-    expect(
-      workbook.getWorksheet('Chi tiết hóa đơn')?.getCell('D2').value,
-    ).toBe('Cơm trưa');
+    expect(workbook.getWorksheet('Giao dịch')?.getCell('M2').value).toBe(
+      '\'=HYPERLINK("https://example.com")',
+    );
+    expect(workbook.getWorksheet('Chi tiết hóa đơn')?.getCell('D2').value).toBe(
+      'Cơm trưa',
+    );
 
     const pdf = await service.exportPdf(data);
     const pdfSource = Buffer.from(pdf.base64, 'base64').toString('latin1');
@@ -349,10 +524,9 @@ describe('ReportsService', () => {
       })),
     };
     const multiPagePdf = await service.exportPdf(multiPageData);
-    const multiPageSource = Buffer.from(
-      multiPagePdf.base64,
-      'base64',
-    ).toString('latin1');
+    const multiPageSource = Buffer.from(multiPagePdf.base64, 'base64').toString(
+      'latin1',
+    );
     const pageCount = multiPageSource.match(/\/Type \/Page\b/g)?.length ?? 0;
     expect(pageCount).toBeGreaterThan(1);
     expect(pageCount).toBeLessThan(12);

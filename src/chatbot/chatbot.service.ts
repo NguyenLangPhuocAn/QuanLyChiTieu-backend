@@ -9,6 +9,10 @@ import { SendChatMessageDto } from './dto/send-chat-message.dto';
 import { GeminiClient } from './gemini.client';
 import { buildFinancialPlanReply } from './financial-plan-reply';
 import { CHAT_ACTION_INSTRUCTIONS, parseChatReply } from './chat-action';
+import {
+  isClearlyOutsideFinancialScope,
+  OUT_OF_SCOPE_REPLY,
+} from './chat-scope';
 
 type MonthlyCashFlowRow = {
   month: string;
@@ -298,6 +302,8 @@ export class ChatbotService {
   private instructions(context: unknown) {
     return [
       'Bạn là trợ lý tài chính cá nhân trong ứng dụng quản lý chi tiêu.',
+      'Chỉ trả lời các nội dung liên quan đến thu chi, giao dịch, ví, ngân sách, tiết kiệm, vay nợ, hóa đơn và kế hoạch tài chính cá nhân.',
+      `Nếu yêu cầu ngoài phạm vi như toán phổ thông, lập trình, kiến thức chung hoặc viết nội dung, trả lời đúng câu sau và không giải yêu cầu: "${OUT_OF_SCOPE_REPLY}"`,
       'Trả lời bằng tiếng Việt, ngắn gọn, dễ hiểu và ưu tiên số liệu có trong ngữ cảnh.',
       'Không dùng Markdown, dấu ** hoặc tiêu đề dạng # vì ứng dụng hiển thị câu trả lời dưới dạng văn bản thuần.',
       'Không cộng trực tiếp các loại tiền tệ khác nhau. Luôn ghi rõ đơn vị tiền.',
@@ -684,21 +690,32 @@ export class ChatbotService {
       context.financial_plan,
       question,
     );
-    const generated = guidedPlan
-      ? { message: guidedPlan, response_id: null, model: 'financial-planner' }
-      : await this.gemini.respond({
-          instructions: [
-            this.instructions(context),
-            CHAT_ACTION_INSTRUCTIONS,
-            `Ngày hiện tại (Việt Nam): ${new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date())}`,
-          ].join('\n'),
-          messages,
-          responseMimeType: 'application/json',
-        });
+    const outOfScope = isClearlyOutsideFinancialScope(question);
+    const generated = outOfScope
+      ? {
+          message: OUT_OF_SCOPE_REPLY,
+          response_id: null,
+          model: 'financial-scope',
+        }
+      : guidedPlan
+        ? { message: guidedPlan, response_id: null, model: 'financial-planner' }
+        : await this.gemini.respond({
+            instructions: [
+              this.instructions(context),
+              CHAT_ACTION_INSTRUCTIONS,
+              `Ngày hiện tại (Việt Nam): ${new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date())}`,
+            ].join('\n'),
+            messages,
+            responseMimeType: 'application/json',
+          });
 
-    const reply = guidedPlan
-      ? { message: guidedPlan, action: null }
-      : parseChatReply(generated.message);
+    const reply =
+      outOfScope || guidedPlan
+        ? {
+            message: outOfScope ? OUT_OF_SCOPE_REPLY : (guidedPlan as string),
+            action: null,
+          }
+        : parseChatReply(generated.message);
     const response = { ...generated, message: reply.message };
 
     const categorySpending =

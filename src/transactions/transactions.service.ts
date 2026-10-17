@@ -6,11 +6,17 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, categories, transactions } from '@prisma/client';
+import {
+  Prisma,
+  categories,
+  categories_type,
+  transactions,
+} from '@prisma/client';
 import { existsSync } from 'fs';
 import { unlink } from 'fs/promises';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { join, normalize } from 'path';
+import ExcelJS from 'exceljs';
 import { CurrencyService } from '../currency/currency.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -52,8 +58,77 @@ type TransactionQuery = {
   note?: string;
   from?: string;
   to?: string;
+  minAmount?: number;
+  maxAmount?: number;
   page?: number;
   limit?: number;
+};
+
+const excelValueText = (value: ExcelJS.CellValue): string => {
+  if (value === null || value === undefined) return '';
+  if (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return String(value);
+  }
+  if (value instanceof Date) return value.toISOString();
+
+  const structured = value as {
+    text?: unknown;
+    result?: unknown;
+    richText?: Array<{ text?: unknown }>;
+  };
+  if (typeof structured.text === 'string') return structured.text;
+  if (
+    typeof structured.result === 'string' ||
+    typeof structured.result === 'number' ||
+    typeof structured.result === 'boolean'
+  ) {
+    return String(structured.result);
+  }
+  if (Array.isArray(structured.richText)) {
+    return structured.richText
+      .map((part) => (typeof part.text === 'string' ? part.text : ''))
+      .join('');
+  }
+  return '';
+};
+
+const parseExcelDate = (value: ExcelJS.CellValue): Date | null => {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value === 'number') {
+    const date = new Date(Math.round((value - 25569) * 86_400_000));
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  const text = excelValueText(value).trim();
+  const localized = text.match(
+    /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/,
+  );
+  if (localized) {
+    const date = new Date(
+      Number(localized[3]),
+      Number(localized[2]) - 1,
+      Number(localized[1]),
+      Number(localized[4] ?? 0),
+      Number(localized[5] ?? 0),
+      Number(localized[6] ?? 0),
+    );
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const parseExcelNumber = (value: ExcelJS.CellValue): number | null => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const normalized = excelValueText(value)
+    .replace(/[^\d,.-]/g, '')
+    .replace(/\.(?=\d{3}(?:\D|$))/g, '')
+    .replace(',', '.');
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
 };
 
 @Injectable()
@@ -146,14 +221,27 @@ export class TransactionsService {
   }
 
   private buildSourceMetadata(dto: CreateTransactionDto) {
-    if (!dto.source && !dto.source_ref) return null;
-    if (!dto.source || !dto.source_ref) {
+    if (dto.client_request_id && (dto.source || dto.source_ref)) {
       throw new BadRequestException(
-        'Nguồn giao dịch và mã chống trùng phải được gửi cùng nhau',
+        'Chỉ dùng một mã chống trùng cho mỗi giao dịch',
       );
     }
+    if (!dto.source && !dto.source_ref && !dto.client_request_id) return null;
+    if (!dto.source || !dto.source_ref) {
+      if (!dto.client_request_id) {
+        throw new BadRequestException(
+          'Nguồn giao dịch và mã chống trùng phải được gửi cùng nhau',
+        );
+      }
+    }
 
-    const sourceRef = `bank:${dto.source_ref.toLowerCase()}`;
+    const isBankNotification = Boolean(dto.source && dto.source_ref);
+    const sourceRef = isBankNotification
+      ? `bank:${dto.source_ref!.toLowerCase()}`
+      : `client:${dto.client_request_id!.toLowerCase()}`;
+    const sourceType = isBankNotification
+      ? 'BANK_NOTIFICATION_IMPORT'
+      : 'CLIENT_TRANSACTION_REQUEST';
     const payloadHash = createHash('sha256')
       .update(
         JSON.stringify({
@@ -163,24 +251,29 @@ export class TransactionsService {
           type: dto.type ?? null,
           note: dto.note?.trim() ?? '',
           transaction_date: dto.transaction_date ?? null,
-          source: dto.source,
+          receipt_image: dto.receipt_image ?? null,
+          receipt_items: dto.receipt_items ?? null,
+          tags: dto.tags ?? [],
+          source: dto.source ?? null,
         }),
       )
       .digest('hex');
 
-    return { sourceRef, payloadHash };
+    return { sourceRef, sourceType, payloadHash, isBankNotification };
   }
 
   private async findSourceDuplicate(
     userId: number,
     sourceRef: string,
+    sourceType: string,
     payloadHash: string,
+    isBankNotification: boolean,
   ) {
     const marker = await this.prisma.notifications.findFirst({
       where: {
         user_id: userId,
         dedupe_key: sourceRef,
-        source_type: 'BANK_NOTIFICATION_IMPORT',
+        source_type: sourceType,
       },
       select: {
         message: true,
@@ -190,11 +283,17 @@ export class TransactionsService {
     if (!marker) return null;
     if (marker.message !== payloadHash) {
       throw new ConflictException(
-        'Thông báo ngân hàng này đã được xử lý với nội dung khác',
+        isBankNotification
+          ? 'Thông báo ngân hàng này đã được xử lý với nội dung khác'
+          : 'Yêu cầu này đã được xử lý với nội dung khác',
       );
     }
     if (!marker.source_id) {
-      throw new ConflictException('Thông báo ngân hàng đang được xử lý');
+      throw new ConflictException(
+        isBankNotification
+          ? 'Thông báo ngân hàng đang được xử lý'
+          : 'Yêu cầu giao dịch đang được xử lý',
+      );
     }
 
     const existing = await this.prisma.transactions.findUnique({
@@ -202,7 +301,11 @@ export class TransactionsService {
       select: this.transactionSelect,
     });
     if (!existing?.wallet_id)
-      throw new ConflictException('Thông báo ngân hàng này đã được xử lý');
+      throw new ConflictException(
+        isBankNotification
+          ? 'Thông báo ngân hàng này đã được xử lý'
+          : 'Yêu cầu giao dịch này đã được xử lý',
+      );
 
     const wallet = await this.getOwnedWallet(userId, existing.wallet_id);
     const [normalized] = await this.attachCategories(
@@ -737,6 +840,62 @@ export class TransactionsService {
       where.amount = { lt: 0 };
     }
 
+    if (query.minAmount !== undefined || query.maxAmount !== undefined) {
+      if (
+        query.minAmount !== undefined &&
+        query.maxAmount !== undefined &&
+        query.minAmount > query.maxAmount
+      ) {
+        throw new BadRequestException(
+          'Số tiền tối thiểu không được lớn hơn số tiền tối đa.',
+        );
+      }
+      if (query.type === TransactionType.INCOME) {
+        where.amount = {
+          gte: query.minAmount ?? 0,
+          ...(query.maxAmount !== undefined ? { lte: query.maxAmount } : {}),
+        };
+      } else if (query.type === TransactionType.EXPENSE) {
+        where.amount = {
+          ...(query.maxAmount !== undefined ? { gte: -query.maxAmount } : {}),
+          ...(query.minAmount !== undefined
+            ? { lte: -query.minAmount }
+            : { lt: 0 }),
+        };
+      } else {
+        const existingAnd = where.AND
+          ? Array.isArray(where.AND)
+            ? where.AND
+            : [where.AND]
+          : [];
+        where.AND = [
+          ...existingAnd,
+          {
+            OR: [
+              {
+                amount: {
+                  gte: query.minAmount ?? 0,
+                  ...(query.maxAmount !== undefined
+                    ? { lte: query.maxAmount }
+                    : {}),
+                },
+              },
+              {
+                amount: {
+                  ...(query.maxAmount !== undefined
+                    ? { gte: -query.maxAmount }
+                    : {}),
+                  ...(query.minAmount !== undefined
+                    ? { lte: -query.minAmount }
+                    : { lt: 0 }),
+                },
+              },
+            ],
+          },
+        ];
+      }
+    }
+
     if (query.cashFlow === 'normal') {
       const normalCategories = await this.prisma.categories.findMany({
         where: { cash_flow_group: 'NORMAL' },
@@ -756,7 +915,13 @@ export class TransactionsService {
         select: { id: true },
       });
 
+      const existingAnd = where.AND
+        ? Array.isArray(where.AND)
+          ? where.AND
+          : [where.AND]
+        : [];
       where.AND = [
+        ...existingAnd,
         {
           category_id: {
             in: loanDebtCategories.map((category) => category.id),
@@ -869,13 +1034,396 @@ export class TransactionsService {
     };
   }
 
+  async importExcel(
+    userId: number,
+    file: Buffer,
+    previewOnly = false,
+    selectedRows?: ReadonlySet<number>,
+  ) {
+    const fileHash = createHash('sha256').update(file).digest('hex');
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(file as never);
+    const sheet = workbook.getWorksheet('Giao dịch');
+
+    if (!sheet || sheet.actualRowCount < 2) {
+      throw new BadRequestException(
+        'File Excel không có sheet “Giao dịch” hoặc chưa có dữ liệu.',
+      );
+    }
+
+    const headerColumns = new Map<string, number>();
+    sheet.getRow(1).eachCell((cell, column) => {
+      headerColumns.set(cell.text.trim(), column);
+    });
+    const requiredHeaders = ['Ngày', 'Loại', 'Ví', 'Số tiền gốc'];
+    if (requiredHeaders.some((header) => !headerColumns.has(header))) {
+      throw new BadRequestException(
+        'File Excel chưa đúng mẫu xuất từ ứng dụng.',
+      );
+    }
+
+    const wallets = await this.prisma.wallets.findMany({
+      where: {
+        user_id: userId,
+        deleted_at: null,
+        OR: [{ is_active: true }, { is_active: null }],
+        wallet_type: { not: 'SAVINGS' },
+      },
+      select: { id: true, name: true, currency: true },
+    });
+    if (!wallets.length) {
+      throw new BadRequestException('Hãy tạo ít nhất một ví trước khi nhập.');
+    }
+    const categories = await this.prisma.categories.findMany({
+      where: {
+        deleted_at: null,
+        OR: [{ is_system: true }, { user_id: userId }],
+        cash_flow_group: 'NORMAL',
+      },
+      select: { id: true, name: true, type: true },
+    });
+    const walletIds = wallets.map((wallet) => wallet.id);
+    const existing = await this.prisma.transactions.findMany({
+      where: { wallet_id: { in: walletIds } },
+      select: {
+        wallet_id: true,
+        category_id: true,
+        amount: true,
+        note: true,
+        transaction_date: true,
+      },
+    });
+    const duplicateKey = (value: {
+      walletId: number;
+      categoryId?: number | null;
+      amount: number;
+      note?: string | null;
+      date: Date;
+    }) =>
+      [
+        value.walletId,
+        value.categoryId ?? '',
+        Math.abs(value.amount).toFixed(2),
+        value.note?.trim() ?? '',
+        value.date.toISOString().slice(0, 19),
+      ].join('|');
+    const existingKeys = new Set(
+      existing.map((transaction) =>
+        duplicateKey({
+          walletId: transaction.wallet_id ?? 0,
+          categoryId: transaction.category_id,
+          amount: Number(transaction.amount),
+          note: transaction.note,
+          date: transaction.transaction_date,
+        }),
+      ),
+    );
+
+    const receiptItemsByTransaction = new Map<
+      string,
+      Array<{ name: string; amount: number }>
+    >();
+    const detailSheet = workbook.getWorksheet('Chi tiết hóa đơn');
+    if (detailSheet && detailSheet.actualRowCount > 1) {
+      const detailHeaders = new Map<string, number>();
+      detailSheet.getRow(1).eachCell((cell, column) => {
+        detailHeaders.set(cell.text.trim(), column);
+      });
+      const idColumn = detailHeaders.get('Mã giao dịch');
+      const nameColumn = detailHeaders.get('Tên món/nội dung');
+      const amountColumn = detailHeaders.get('Thành tiền');
+      if (idColumn && nameColumn && amountColumn) {
+        detailSheet.eachRow((row, rowNumber) => {
+          if (rowNumber === 1) return;
+          const oldId = row.getCell(idColumn).text.trim();
+          const name = row.getCell(nameColumn).text.trim();
+          const amount = parseExcelNumber(row.getCell(amountColumn).value);
+          if (!oldId || !name || amount === null || amount < 0) return;
+          receiptItemsByTransaction.set(oldId, [
+            ...(receiptItemsByTransaction.get(oldId) ?? []),
+            { name, amount },
+          ]);
+        });
+      }
+    }
+
+    const cell = (row: ExcelJS.Row, header: string) => {
+      const column = headerColumns.get(header);
+      return column ? row.getCell(column) : null;
+    };
+    let created = 0;
+    let skipped = 0;
+    let failed = 0;
+    const warnings: string[] = [];
+    const previewRows: Array<{
+      row: number;
+      status: 'READY' | 'DUPLICATE' | 'INVALID' | 'UNSUPPORTED';
+      date?: string;
+      type?: TransactionType;
+      wallet?: string;
+      category?: string | null;
+      amount?: number;
+      note?: string;
+      reason?: string;
+    }> = [];
+    const createdIds: number[] = [];
+
+    for (let rowNumber = 2; rowNumber <= sheet.actualRowCount; rowNumber += 1) {
+      const row = sheet.getRow(rowNumber);
+      const group = cell(row, 'Nhóm giao dịch')?.text.trim();
+      if (group && group !== 'Thu/chi thông thường') {
+        skipped += 1;
+        previewRows.push({
+          row: rowNumber,
+          status: 'UNSUPPORTED',
+          reason: `Nhóm “${group}” được giữ ngoài luồng nhập thu/chi.`,
+        });
+        continue;
+      }
+      const date = parseExcelDate(cell(row, 'Ngày')?.value ?? null);
+      const amount = parseExcelNumber(cell(row, 'Số tiền gốc')?.value ?? null);
+      const typeText = cell(row, 'Loại')?.text.trim().toLocaleLowerCase('vi');
+      const type =
+        typeText === 'thu' ? TransactionType.INCOME : TransactionType.EXPENSE;
+      const categoryType =
+        type === TransactionType.INCOME
+          ? categories_type.INCOME
+          : categories_type.EXPENSE;
+      const walletName = cell(row, 'Ví')?.text.trim().toLocaleLowerCase('vi');
+      const walletCurrency = cell(row, 'Tiền tệ gốc')
+        ?.text.trim()
+        .toUpperCase();
+      const oldWalletId = parseExcelNumber(cell(row, 'Mã ví')?.value ?? null);
+      const wallet =
+        wallets.find((item) => item.id === oldWalletId) ??
+        wallets.find(
+          (item) =>
+            item.name.trim().toLocaleLowerCase('vi') === walletName &&
+            (!walletCurrency || item.currency.toUpperCase() === walletCurrency),
+        );
+      if (!date || amount === null || amount <= 0 || !wallet) {
+        failed += 1;
+        const reason = 'Thiếu ngày, số tiền hoặc ví phù hợp.';
+        warnings.push(`Dòng ${rowNumber}: ${reason}`);
+        previewRows.push({
+          row: rowNumber,
+          status: 'INVALID',
+          amount: amount ?? undefined,
+          reason,
+        });
+        continue;
+      }
+
+      const categoryName = cell(row, 'Danh mục')
+        ?.text.trim()
+        .toLocaleLowerCase('vi');
+      const oldCategoryId = parseExcelNumber(
+        cell(row, 'Mã danh mục')?.value ?? null,
+      );
+      const category =
+        categories.find(
+          (item) => item.id === oldCategoryId && item.type === categoryType,
+        ) ??
+        categories.find(
+          (item) =>
+            item.type === categoryType &&
+            item.name.trim().toLocaleLowerCase('vi') === categoryName,
+        );
+      const note = cell(row, 'Ghi chú')?.text.trim() ?? '';
+      const key = duplicateKey({
+        walletId: wallet.id,
+        categoryId: category?.id,
+        amount,
+        note,
+        date,
+      });
+      if (existingKeys.has(key)) {
+        skipped += 1;
+        previewRows.push({
+          row: rowNumber,
+          status: 'DUPLICATE',
+          date: date.toISOString(),
+          type,
+          wallet: wallet.name,
+          category: category?.name ?? null,
+          amount,
+          note,
+          reason: 'Khớp ví, danh mục, số tiền, ghi chú và thời gian đã có.',
+        });
+        continue;
+      }
+
+      const tags = (cell(row, 'Hashtag')?.text ?? '')
+        .split(/[#;,\n\r]+/)
+        .map((tag) => tag.trim())
+        .filter(Boolean)
+        .slice(0, 8);
+      const oldTransactionId = cell(row, 'Mã giao dịch')?.text.trim() ?? '';
+      if (previewOnly) {
+        existingKeys.add(key);
+        previewRows.push({
+          row: rowNumber,
+          status: 'READY',
+          date: date.toISOString(),
+          type,
+          wallet: wallet.name,
+          category: category?.name ?? null,
+          amount,
+          note,
+        });
+        continue;
+      }
+      if (selectedRows && !selectedRows.has(rowNumber)) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const createdTransaction = await this.create(userId, {
+          wallet_id: wallet.id,
+          category_id: category?.id,
+          type,
+          amount: Math.abs(amount).toFixed(2),
+          note: note || undefined,
+          transaction_date: date.toISOString(),
+          tags,
+          receipt_items: receiptItemsByTransaction.get(oldTransactionId) ?? [],
+          client_request_id: `excel_${fileHash.slice(0, 40)}_${rowNumber}`,
+        });
+        if (Number.isInteger(createdTransaction.id)) {
+          createdIds.push(createdTransaction.id);
+        }
+        existingKeys.add(key);
+        created += 1;
+      } catch (error) {
+        failed += 1;
+        const reason =
+          error instanceof Error ? error.message : 'Lỗi không xác định';
+        warnings.push(`Dòng ${rowNumber}: ${reason}`);
+      }
+    }
+
+    if (previewOnly) {
+      return {
+        fileHash,
+        totalRows: Math.max(0, sheet.actualRowCount - 1),
+        ready: previewRows.filter((row) => row.status === 'READY').length,
+        duplicates: previewRows.filter((row) => row.status === 'DUPLICATE')
+          .length,
+        invalid: previewRows.filter((row) => row.status === 'INVALID').length,
+        unsupported: previewRows.filter((row) => row.status === 'UNSUPPORTED')
+          .length,
+        rows: previewRows.slice(0, 500),
+        warnings: warnings.slice(0, 20),
+      };
+    }
+
+    let batchId: number | null = null;
+    if (createdIds.length) {
+      const marker = await this.prisma.notifications.create({
+        data: {
+          user_id: userId,
+          type: 'SYSTEM',
+          severity: 'INFO',
+          title: 'Lô nhập Excel',
+          message: JSON.stringify({
+            version: 1,
+            fileHash,
+            transactionIds: createdIds,
+            createdAt: new Date().toISOString(),
+          }),
+          source_type: 'EXCEL_IMPORT_BATCH',
+          dedupe_key: `excel-import:${randomUUID()}`,
+          read_at: new Date(),
+          deleted_at: new Date(),
+        },
+        select: { id: true },
+      });
+      batchId = marker.id;
+    }
+
+    return {
+      batchId,
+      created,
+      skipped,
+      failed,
+      warnings: warnings.slice(0, 20),
+    };
+  }
+
+  previewExcel(userId: number, file: Buffer) {
+    return this.importExcel(userId, file, true);
+  }
+
+  async undoExcelImport(userId: number, batchId: number) {
+    const marker = await this.prisma.notifications.findFirst({
+      where: {
+        id: batchId,
+        user_id: userId,
+        source_type: 'EXCEL_IMPORT_BATCH',
+      },
+      select: { id: true, message: true },
+    });
+    if (!marker) {
+      throw new NotFoundException('Không tìm thấy lô nhập có thể hoàn tác');
+    }
+
+    let transactionIds: number[] = [];
+    try {
+      const parsed = JSON.parse(marker.message) as {
+        transactionIds?: unknown;
+      };
+      if (Array.isArray(parsed.transactionIds)) {
+        transactionIds = parsed.transactionIds.filter(
+          (id): id is number => Number.isInteger(id) && id > 0,
+        );
+      }
+    } catch {
+      throw new ConflictException('Thông tin lô nhập không còn hợp lệ');
+    }
+
+    let removed = 0;
+    const warnings: string[] = [];
+    for (const transactionId of [...transactionIds].reverse()) {
+      try {
+        await this.remove(userId, transactionId);
+        removed += 1;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'Không thể xóa';
+        warnings.push(`Giao dịch ${transactionId}: ${reason}`);
+      }
+    }
+
+    await this.prisma.notifications.update({
+      where: { id: marker.id },
+      data: {
+        source_type: 'EXCEL_IMPORT_BATCH_UNDONE',
+        title: 'Đã hoàn tác lô nhập Excel',
+        message: JSON.stringify({
+          version: 1,
+          transactionIds,
+          removed,
+          undoneAt: new Date().toISOString(),
+        }),
+      },
+    });
+
+    return {
+      batchId,
+      removed,
+      failed: transactionIds.length - removed,
+      warnings: warnings.slice(0, 20),
+    };
+  }
+
   async create(userId: number, dto: CreateTransactionDto) {
     const sourceMetadata = this.buildSourceMetadata(dto);
     if (sourceMetadata) {
       const duplicate = await this.findSourceDuplicate(
         userId,
         sourceMetadata.sourceRef,
+        sourceMetadata.sourceType,
         sourceMetadata.payloadHash,
+        sourceMetadata.isBankNotification,
       );
       if (duplicate) return duplicate;
     }
@@ -890,7 +1438,7 @@ export class TransactionsService {
     );
     const receiptItems = this.normalizeReceiptItems(dto.receipt_items);
 
-    let created;
+    let created: transactions;
     try {
       created = await this.prisma.$transaction(async (tx) => {
         const sourceMarker = sourceMetadata
@@ -899,9 +1447,11 @@ export class TransactionsService {
                 user_id: userId,
                 type: 'SYSTEM',
                 severity: 'INFO',
-                title: 'Đồng bộ giao dịch ngân hàng',
+                title: sourceMetadata.isBankNotification
+                  ? 'Đồng bộ giao dịch ngân hàng'
+                  : 'Chống ghi trùng giao dịch',
                 message: sourceMetadata.payloadHash,
-                source_type: 'BANK_NOTIFICATION_IMPORT',
+                source_type: sourceMetadata.sourceType,
                 dedupe_key: sourceMetadata.sourceRef,
                 read_at: new Date(),
                 deleted_at: new Date(),
@@ -944,7 +1494,9 @@ export class TransactionsService {
         const duplicate = await this.findSourceDuplicate(
           userId,
           sourceMetadata.sourceRef,
+          sourceMetadata.sourceType,
           sourceMetadata.payloadHash,
+          sourceMetadata.isBankNotification,
         );
         if (duplicate) return duplicate;
       }

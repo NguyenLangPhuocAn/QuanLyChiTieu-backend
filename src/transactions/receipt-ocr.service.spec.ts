@@ -50,14 +50,52 @@ describe('ReceiptOcrService', () => {
       amount: 88000,
       currency: 'VND',
       suggested_category: { id: 3, name: 'Ăn uống' },
-      receipt_items: [],
+      receipt_items: [
+        { name: 'Cua 0,5 kg', amount: 50000 },
+        { name: 'Rau', amount: 30000 },
+      ],
     });
-    expect(result.warnings).not.toContain('Không đọc được danh sách món hàng.');
+    expect(result.warnings).toContain(
+      'Một số dòng không rõ hoặc dòng tổng hợp đã được bỏ qua.',
+    );
+    expect(JSON.stringify(gemini.analyzeImage.mock.calls)).toContain(
+      'ký hiệu đ',
+    );
     expect(gemini.analyzeImage).toHaveBeenCalledWith(
       expect.objectContaining({
         mimeType: 'image/jpeg',
         imageBase64: file.buffer.toString('base64'),
       }),
+    );
+  });
+
+  it('keeps only safe product rows and warns when none can be read', async () => {
+    const prisma = {
+      users: { findUnique: jest.fn().mockResolvedValue({ role: 'BASIC' }) },
+      categories: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const gemini = {
+      analyzeImage: jest.fn().mockResolvedValue({
+        message: JSON.stringify({
+          amount: 100000,
+          receipt_items: [
+            { name: 'Tổng cộng', amount: 100000 },
+            { name: '', amount: 50000 },
+            { name: 'Dòng lỗi', amount: '50,000' },
+          ],
+        }),
+        model: 'test-model',
+      }),
+    };
+
+    const result = await new ReceiptOcrService(
+      prisma as unknown as PrismaService,
+      gemini as unknown as GeminiClient,
+    ).analyze(7, file);
+
+    expect(result.receipt_items).toEqual([]);
+    expect(result.warnings).toContain(
+      'Không đọc được danh sách món hàng rõ ràng.',
     );
   });
 
@@ -100,7 +138,9 @@ describe('ReceiptOcrService', () => {
         gemini as unknown as GeminiClient,
       ).analyze(7, file);
       expect(result.amount).toBeNull();
-      expect(result.warnings).toContain('Không đọc được tổng thanh toán hợp lệ.');
+      expect(result.warnings).toContain(
+        'Không đọc được tổng thanh toán hợp lệ.',
+      );
     },
   );
 });

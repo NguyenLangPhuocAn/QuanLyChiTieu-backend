@@ -6,6 +6,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TransactionsService } from './transactions.service';
 import { TransactionType } from './dto/create-transaction.dto';
+import ExcelJS from 'exceljs';
 
 const createPrismaMock = () => {
   const tx = {
@@ -46,9 +47,12 @@ const createPrismaMock = () => {
     },
     notifications: {
       findFirst: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockResolvedValue({ id: 501 }),
+      update: jest.fn(),
     },
     wallets: {
       update: jest.fn(),
+      findMany: jest.fn(),
     },
     transaction_tags: {
       deleteMany: jest.fn(),
@@ -65,6 +69,166 @@ const createPrismaMock = () => {
 };
 
 describe('TransactionsService', () => {
+  it('imports normal transactions and receipt items from an exported workbook', async () => {
+    const prisma = createPrismaMock();
+    prisma.wallets.findMany.mockResolvedValue([
+      { id: 2, name: 'Tiền mặt', currency: 'VND' },
+    ]);
+    prisma.categories.findMany.mockResolvedValue([
+      { id: 3, name: 'Di chuyển', type: 'EXPENSE' },
+    ]);
+    prisma.transactions.findMany.mockResolvedValue([]);
+    const service = new TransactionsService(
+      prisma as unknown as PrismaService,
+      {} as CurrencyService,
+      {} as NotificationsService,
+    );
+    const create = jest.spyOn(service, 'create').mockResolvedValue({} as never);
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Giao dịch');
+    sheet.addRow([
+      'Mã giao dịch',
+      'Ngày',
+      'Loại',
+      'Ví',
+      'Danh mục',
+      'Số tiền gốc',
+      'Tiền tệ gốc',
+      'Hashtag',
+      'Ghi chú',
+      'Nhóm giao dịch',
+      'Mã ví',
+      'Mã danh mục',
+    ]);
+    sheet.addRow([
+      44,
+      new Date('2026-10-01T08:00:00.000Z'),
+      'Chi',
+      'Tiền mặt',
+      'Di chuyển',
+      125000,
+      'VND',
+      '#grab',
+      'Grab đi làm',
+      'Thu/chi thông thường',
+      2,
+      3,
+    ]);
+    const details = workbook.addWorksheet('Chi tiết hóa đơn');
+    details.addRow(['Mã giao dịch', 'Tên món/nội dung', 'Thành tiền']);
+    details.addRow([44, 'Chuyến đi', 125000]);
+    const buffer = await workbook.xlsx.writeBuffer();
+
+    await expect(
+      service.importExcel(7, Buffer.from(buffer), false, new Set([2])),
+    ).resolves.toMatchObject({ created: 1, skipped: 0, failed: 0 });
+    expect(create).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({
+        wallet_id: 2,
+        category_id: 3,
+        amount: '125000.00',
+        note: 'Grab đi làm',
+        tags: ['grab'],
+        receipt_items: [{ name: 'Chuyến đi', amount: 125000 }],
+      }),
+    );
+
+    create.mockClear();
+    await expect(
+      service.importExcel(7, Buffer.from(buffer), false, new Set([99])),
+    ).resolves.toMatchObject({ created: 0, skipped: 1, failed: 0 });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('previews an Excel import without creating transactions', async () => {
+    const prisma = createPrismaMock();
+    prisma.wallets.findMany.mockResolvedValue([
+      { id: 2, name: 'Tiền mặt', currency: 'VND' },
+    ]);
+    prisma.categories.findMany.mockResolvedValue([
+      { id: 3, name: 'Di chuyển', type: 'EXPENSE' },
+    ]);
+    prisma.transactions.findMany.mockResolvedValue([]);
+    const service = new TransactionsService(
+      prisma as unknown as PrismaService,
+      {} as CurrencyService,
+      {} as NotificationsService,
+    );
+    const create = jest.spyOn(service, 'create');
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Giao dịch');
+    sheet.addRow([
+      'Ngày',
+      'Loại',
+      'Ví',
+      'Danh mục',
+      'Số tiền gốc',
+      'Tiền tệ gốc',
+      'Ghi chú',
+      'Nhóm giao dịch',
+      'Mã ví',
+      'Mã danh mục',
+    ]);
+    sheet.addRow([
+      new Date('2026-10-17T08:00:00.000Z'),
+      'Chi',
+      'Tiền mặt',
+      'Di chuyển',
+      45000,
+      'VND',
+      'Đi xe',
+      'Thu/chi thông thường',
+      2,
+      3,
+    ]);
+    const buffer = await workbook.xlsx.writeBuffer();
+
+    await expect(
+      service.previewExcel(7, Buffer.from(buffer)),
+    ).resolves.toMatchObject({
+      totalRows: 1,
+      ready: 1,
+      duplicates: 0,
+      invalid: 0,
+      rows: [expect.objectContaining({ row: 2, status: 'READY' })],
+    });
+    expect(create).not.toHaveBeenCalled();
+    expect(prisma.notifications.create).not.toHaveBeenCalled();
+  });
+
+  it('undoes only transactions recorded in the selected Excel batch', async () => {
+    const prisma = createPrismaMock();
+    prisma.notifications.findFirst.mockResolvedValue({
+      id: 501,
+      message: JSON.stringify({ transactionIds: [10, 11] }),
+    });
+    const service = new TransactionsService(
+      prisma as unknown as PrismaService,
+      {} as CurrencyService,
+      {} as NotificationsService,
+    );
+    const remove = jest.spyOn(service, 'remove').mockResolvedValue({} as never);
+
+    await expect(service.undoExcelImport(7, 501)).resolves.toMatchObject({
+      batchId: 501,
+      removed: 2,
+      failed: 0,
+    });
+    expect(remove.mock.calls).toEqual([
+      [7, 11],
+      [7, 10],
+    ]);
+    expect(prisma.notifications.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 501 },
+        data: expect.objectContaining({
+          source_type: 'EXCEL_IMPORT_BATCH_UNDONE',
+        }),
+      }),
+    );
+  });
+
   it.each(['opening', 'payment'] as const)(
     'blocks deleting a loan %s transaction from the regular ledger',
     async (kind) => {
@@ -341,7 +505,9 @@ describe('TransactionsService', () => {
     const service = new TransactionsService(
       prisma as unknown as PrismaService,
       currencyService as unknown as CurrencyService,
-      { createBudgetAlertsForWallet: jest.fn() } as unknown as NotificationsService,
+      {
+        createBudgetAlertsForWallet: jest.fn(),
+      } as unknown as NotificationsService,
     );
     const fingerprint = 'a'.repeat(64);
 
@@ -395,6 +561,9 @@ describe('TransactionsService', () => {
           type: payload.type,
           note: payload.note,
           transaction_date: payload.transaction_date,
+          receipt_image: null,
+          receipt_items: null,
+          tags: [],
           source: payload.source,
         }),
       )
@@ -464,6 +633,82 @@ describe('TransactionsService', () => {
         source_ref: 'd'.repeat(64),
       }),
     ).rejects.toThrow('đã được xử lý với nội dung khác');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('uses a client request id to make an offline retry idempotent', async () => {
+    const prisma = createPrismaMock();
+    const payload = {
+      wallet_id: 2,
+      category_id: 3,
+      amount: '45000',
+      type: TransactionType.EXPENSE,
+      note: 'Bản nháp ngoại tuyến',
+      transaction_date: '2026-10-17',
+      tags: ['offline'],
+      client_request_id: 'offline_20261017_abcdef123456',
+    };
+    const payloadHash = createHash('sha256')
+      .update(
+        JSON.stringify({
+          wallet_id: payload.wallet_id,
+          category_id: payload.category_id,
+          amount: payload.amount,
+          type: payload.type,
+          note: payload.note,
+          transaction_date: payload.transaction_date,
+          receipt_image: null,
+          receipt_items: null,
+          tags: payload.tags,
+          source: null,
+        }),
+      )
+      .digest('hex');
+    prisma.notifications.findFirst.mockResolvedValue({
+      message: payloadHash,
+      source_id: 10,
+    });
+    prisma.transactions.findUnique.mockResolvedValue({
+      id: 10,
+      wallet_id: 2,
+      category_id: 3,
+      amount: new Prisma.Decimal(-45000),
+      currency: 'VND',
+      converted_amount: new Prisma.Decimal(-45000),
+      converted_currency: 'VND',
+      exchange_rate_used: new Prisma.Decimal(1),
+      note: payload.note,
+      receipt_image: null,
+      receipt_items: null,
+      transaction_date: new Date('2026-10-17T00:00:00.000Z'),
+      created_at: new Date('2026-10-17T00:00:01.000Z'),
+    });
+    prisma.$queryRaw.mockResolvedValue([
+      { id: 2, user_id: 7, currency: 'VND' },
+    ]);
+    prisma.users.findUnique.mockResolvedValue({ currency_default: 'VND' });
+    prisma.categories.findMany.mockResolvedValue([
+      { id: 3, name: 'Ăn uống', type: 'EXPENSE', icon: null },
+    ]);
+    const service = new TransactionsService(
+      prisma as unknown as PrismaService,
+      {
+        normalizeCurrency: (value?: string | null) => value ?? 'VND',
+      } as CurrencyService,
+      {} as NotificationsService,
+    );
+
+    const result = await service.create(7, payload);
+
+    expect(result).toEqual(expect.objectContaining({ id: 10 }));
+    expect(prisma.notifications.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          dedupe_key: `client:${payload.client_request_id}`,
+          source_type: 'CLIENT_TRANSACTION_REQUEST',
+        }),
+      }),
+    );
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 

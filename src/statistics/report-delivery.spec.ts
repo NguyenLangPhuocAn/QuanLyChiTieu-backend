@@ -23,6 +23,7 @@ const fixture = {
       currency: 'VND',
       note: '',
       tags: [],
+      receiptItems: [],
     },
     {
       id: 2,
@@ -35,6 +36,7 @@ const fixture = {
       currency: 'VND',
       note: '',
       tags: [],
+      receiptItems: [],
     },
   ],
 };
@@ -51,6 +53,12 @@ const sendMail = jest.fn<
 let service: ReportsService;
 beforeEach(() => {
   service = new ReportsService({} as never, {} as never);
+  jest
+    .spyOn(
+      service as unknown as { buildAdditionalExcelData(): Promise<unknown> },
+      'buildAdditionalExcelData',
+    )
+    .mockResolvedValue({ transfers: [], savings: [], loans: [], payments: [] });
   jest
     .spyOn(
       service as unknown as { buildReportData(): Promise<typeof fixture> },
@@ -81,7 +89,7 @@ it('rejects missing SMTP instead of logging report contents or claiming success'
   expect(log).not.toHaveBeenCalled();
 });
 
-it('sends a five-sheet workbook and escaped summary without claiming inbox delivery', async () => {
+it('sends the complete workbook and escaped summary without claiming inbox delivery', async () => {
   const result = await service.sendExcelReport(
     1,
     'PREMIUM',
@@ -103,12 +111,10 @@ it('sends a five-sheet workbook and escaped summary without claiming inbox deliv
   expect(mail.text).toContain('Chênh lệch thu – chi');
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(mail.attachments[0].content as never);
-  expect(workbook.worksheets).toHaveLength(5);
-  expect(workbook.getWorksheet('Giao dich')?.rowCount).toBe(3);
-  expect(workbook.getWorksheet('Chi theo danh muc')?.getCell('B2').value).toBe(
-    100,
-  );
-  expect(workbook.getWorksheet('Thu chi theo thang')?.getCell('D2').value).toBe(
+  expect(workbook.worksheets).toHaveLength(11);
+  expect(workbook.getWorksheet('Giao dịch')?.rowCount).toBe(3);
+  expect(workbook.getWorksheet('Danh mục')?.getCell('B2').value).toBe(100);
+  expect(workbook.getWorksheet('Thu chi theo kỳ')?.getCell('D2').value).toBe(
     900,
   );
 });

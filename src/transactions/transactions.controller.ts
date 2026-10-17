@@ -40,6 +40,15 @@ type AuthenticatedRequest = Request & {
   };
 };
 
+const parseQueryAmount = (value: string | undefined, label: string) => {
+  if (value === undefined || value.trim() === '') return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new BadRequestException(`${label} không hợp lệ.`);
+  }
+  return parsed;
+};
+
 const receiptUploadDir = join(process.cwd(), 'uploads', 'receipts');
 
 @Controller('transactions')
@@ -62,6 +71,8 @@ export class TransactionsController {
     @Query('note') note?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
+    @Query('min_amount') minAmount?: string,
+    @Query('max_amount') maxAmount?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
@@ -85,6 +96,8 @@ export class TransactionsController {
       note,
       from,
       to,
+      minAmount: parseQueryAmount(minAmount, 'Số tiền tối thiểu'),
+      maxAmount: parseQueryAmount(maxAmount, 'Số tiền tối đa'),
       page: parseQueryInteger(page, 'Trang'),
       limit: parseQueryInteger(limit, 'Số kết quả'),
     });
@@ -150,6 +163,90 @@ export class TransactionsController {
       throw new BadRequestException('Vui lòng chọn ảnh hóa đơn');
     }
     return this.receiptOcrService.analyze(req.user.userId, file);
+  }
+
+  @Post('import-excel')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+      fileFilter: (_request, file, callback) => {
+        const isExcel =
+          file.originalname.toLocaleLowerCase().endsWith('.xlsx') ||
+          file.mimetype ===
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        callback(
+          isExcel ? null : new BadRequestException('Chỉ hỗ trợ file XLSX.'),
+          isExcel,
+        );
+      },
+    }),
+  )
+  importExcel(
+    @Req() req: AuthenticatedRequest,
+    @UploadedFile() file: Express.Multer.File,
+    @Query('rows') rows?: string,
+  ) {
+    if (!file) {
+      throw new BadRequestException('Vui lòng chọn file Excel.');
+    }
+    const selectedRows = rows
+      ? new Set(
+          rows
+            .split(',')
+            .map((value) => Number(value))
+            .filter((value) => Number.isInteger(value) && value >= 2),
+        )
+      : undefined;
+    if (selectedRows && selectedRows.size === 0) {
+      throw new BadRequestException('Chưa chọn dòng nào để nhập.');
+    }
+    if (selectedRows && selectedRows.size > 500) {
+      throw new BadRequestException(
+        'Mỗi lần chỉ nhập tối đa 500 dòng đã chọn.',
+      );
+    }
+    return this.transactionsService.importExcel(
+      req.user.userId,
+      file.buffer,
+      false,
+      selectedRows,
+    );
+  }
+
+  @Post('preview-excel')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+      fileFilter: (_request, file, callback) => {
+        const isExcel =
+          file.originalname.toLocaleLowerCase().endsWith('.xlsx') ||
+          file.mimetype ===
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        callback(
+          isExcel ? null : new BadRequestException('Chỉ hỗ trợ file XLSX.'),
+          isExcel,
+        );
+      },
+    }),
+  )
+  previewExcel(
+    @Req() req: AuthenticatedRequest,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) {
+      throw new BadRequestException('Vui lòng chọn file Excel.');
+    }
+    return this.transactionsService.previewExcel(req.user.userId, file.buffer);
+  }
+
+  @Delete('import-batches/:id')
+  undoExcelImport(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.transactionsService.undoExcelImport(req.user.userId, id);
   }
 
   @Post(':id/receipt')
