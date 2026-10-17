@@ -10,5 +10,6 @@ import { ReceiptOcrService } from './receipt-ocr.service';
   imports: [PrismaModule, NotificationsModule, ChatbotModule],
   controllers: [TransactionsController],
   providers: [TransactionsService, ReceiptOcrService],
+  exports: [TransactionsService],
 })
 export class TransactionsModule {}

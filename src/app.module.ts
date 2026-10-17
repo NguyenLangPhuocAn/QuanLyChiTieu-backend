@@ -21,6 +21,7 @@ import { SavingsModule } from './savings/savings.module';
 import { ChatbotModule } from './chatbot/chatbot.module';
 import { PaymentsModule } from './payments/payments.module';
 import { FinancialPlansModule } from './financial-plans/financial-plans.module';
+import { PersonalBackupModule } from './personal-backup/personal-backup.module';
 
 @Module({
   imports: [
@@ -51,6 +52,7 @@ import { FinancialPlansModule } from './financial-plans/financial-plans.module';
     ChatbotModule,
     PaymentsModule,
     FinancialPlansModule,
+    PersonalBackupModule,
   ],
   controllers: [AppController],
   providers: [AppService],
