@@ -727,7 +727,7 @@ describe('TransactionsService', () => {
       category_id: 3,
       amount: new Prisma.Decimal(-10),
       note: 'Coffee',
-      receipt_image: null,
+      receipt_image: 'receipt-existing.jpg',
       transaction_date: new Date('2026-05-23T00:00:00.000Z'),
       created_at: new Date('2026-05-23T01:00:00.000Z'),
       currency: 'USD',
@@ -766,7 +766,10 @@ describe('TransactionsService', () => {
       notificationsService as unknown as NotificationsService,
     );
 
-    await service.update(7, 10, { note: 'Coffee with friend' });
+    await service.update(7, 10, {
+      note: 'Coffee with friend',
+      receipt_image: undefined,
+    });
 
     expect(currencyService.convertAmount).not.toHaveBeenCalled();
     expect(prisma.tx.transactions.update).toHaveBeenCalledWith({
@@ -777,6 +780,7 @@ describe('TransactionsService', () => {
         converted_amount: undefined,
         converted_currency: undefined,
         exchange_rate_used: undefined,
+        receipt_image: undefined,
       }),
       select: expect.any(Object),
     });

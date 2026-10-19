@@ -1601,12 +1601,10 @@ export class TransactionsService {
           converted_currency: conversionSnapshot?.converted_currency,
           exchange_rate_used: conversionSnapshot?.exchange_rate_used,
           note: dto.note ?? undefined,
-          receipt_image: Object.prototype.hasOwnProperty.call(
-            dto,
-            'receipt_image',
-          )
-            ? (dto.receipt_image ?? null)
-            : undefined,
+          receipt_image:
+            dto.receipt_image !== undefined
+              ? (dto.receipt_image ?? null)
+              : undefined,
           receipt_items: receiptItems,
           transaction_date: dto.transaction_date
             ? this.parseTransactionDate(dto.transaction_date)
@@ -1638,11 +1636,7 @@ export class TransactionsService {
       }
     }
 
-    if (
-      Object.prototype.hasOwnProperty.call(dto, 'receipt_image') &&
-      dto.receipt_image === null &&
-      current.receipt_image
-    ) {
+    if (dto.receipt_image === null && current.receipt_image) {
       await this.deleteReceiptFile(current.receipt_image);
     }
 
