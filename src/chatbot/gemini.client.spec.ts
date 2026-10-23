@@ -98,4 +98,69 @@ describe('GeminiClient', () => {
       { role: 'user', parts: [{ text: 'Còn tháng này?' }] },
     ]);
   });
+  it('sends the extraction JSON schema and short limits without changing the default model', async () => {
+    process.env.GEMINI_API_KEY = 'test-key';
+    process.env.GEMINI_MODEL = 'existing-model';
+    const request = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: '{}' }] } }],
+        }),
+        { status: 200 },
+      ),
+    );
+    await new GeminiClient().respond({
+      instructions: 'Extract fields',
+      messages: [{ role: 'user', content: 'Synthetic notification' }],
+      responseMimeType: 'application/json',
+      responseJsonSchema: { type: 'object', required: ['type'] },
+      maxOutputTokens: 600,
+      temperature: 0,
+      timeoutMs: 12000,
+    });
+    const options = request.mock.calls[0][1];
+    if (typeof options?.body !== 'string')
+      throw new Error('Expected a JSON body');
+    const body = JSON.parse(options.body) as {
+      generationConfig: Record<string, unknown>;
+    };
+    expect(body.generationConfig).toMatchObject({
+      responseJsonSchema: { type: 'object', required: ['type'] },
+      responseMimeType: 'application/json',
+      maxOutputTokens: 600,
+      temperature: 0,
+    });
+    const target = request.mock.calls[0][0];
+    expect(
+      typeof target === 'string'
+        ? target
+        : target instanceof URL
+          ? target.href
+          : target.url,
+    ).toContain('/models/existing-model:');
+  });
+  it('aborts an extraction at its explicit timeout', async () => {
+    jest.useFakeTimers();
+    process.env.GEMINI_API_KEY = 'test-key';
+    jest.spyOn(global, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          );
+        }),
+    );
+    try {
+      const pending = new GeminiClient().respond({
+        instructions: 'Extract',
+        messages: [],
+        timeoutMs: 12000,
+      });
+      const assertion = expect(pending).rejects.toThrow('phản hồi quá lâu');
+      await jest.advanceTimersByTimeAsync(12000);
+      await assertion;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

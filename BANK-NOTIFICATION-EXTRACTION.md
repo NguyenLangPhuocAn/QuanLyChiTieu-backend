@@ -1,28 +1,29 @@
-# Trích xuất nội dung thông báo — source thử nghiệm
+# AI trích xuất thông báo ngân hàng — source 23/10/2026
 
-Ngày: 23/10/2026. Chưa triển khai lên server đang chạy. Source mobile đã đổi sang đọc chữ thông báo trực tiếp qua lắc/chuông, không gọi AI trong luồng rút gọn; chưa có APK mới hoặc thử thiết bị thật.
+Chưa deploy lên server đang chạy, chưa bật cờ thực tế hoặc phát hành APK mới.
 
-## Phạm vi đã có
+## Luồng
 
-- `GET /features`, yêu cầu JWT, chỉ trả `bank_notification_ai`.
-- `POST /bank-notifications/extract`, yêu cầu JWT, body `{ "text": "...", "consent": true }`.
-- Giới hạn 800 ký tự; từ chối OTP/mật khẩu; che số tài khoản và mã tham chiếu, bỏ số dư trước khi gọi model.
-- Mọi số tiền trả về phải xuất hiện trong nội dung đã che và có bằng chứng nguyên văn về chiều thu/chi. Nhiều số tiền, thiếu bằng chứng hoặc kết quả không khớp trả `REVIEW` với số tiền rỗng.
-- Giới hạn một yêu cầu model đồng thời và tối đa 3 lần/phút cho mỗi tài khoản, tối đa 1.000 tài khoản trong bộ đếm của một tiến trình. Lỗi upstream vẫn tính vào hạn mức. Nhiều instance cần bộ đếm dùng chung trước khi mở rộng vận hành.
-- Kết quả chỉ là bản nháp, không chứa ví hay mã giao dịch đã lưu. Service không có kết nối ghi database.
-- `visibility_verified: false` luôn được trả về: trích xuất văn bản không chứng minh rằng nguồn là banner đang nổi.
+Lắc/chuông chọn notification mới nhất → lọc dữ liệu nhạy cảm → kiểm tra cờ → xem/đồng ý gửi chữ (một lần hoặc nhớ theo tài khoản) → Gemini JSON → đối chiếu an toàn → bản nháp cần người dùng chọn ví và Save. Không chụp/upload ảnh, không tự ghi tiền.
 
-## Bật/tắt
+- GET /features yêu cầu JWT, chỉ trả bank_notification_ai. Mặc định FEATURE_BANK_NOTIFICATION_AI=false.
+- POST /bank-notifications/extract yêu cầu JWT, text 5–800 ký tự và consent=true. Chặn OTP/mật khẩu, che tài khoản/mã tham chiếu và bỏ số dư trước model. Bộ che là biện pháp giới hạn dữ liệu, không cam kết nhận biết mọi thông tin cá nhân; app hiển thị chữ gửi và yêu cầu đồng ý.
+- AI là bộ trích xuất chính. Không dùng unique-money/direction keyword để chọn trường trước model; có phí thì model chọn tiền chính. Sau model vẫn đối chiếu literal tiền/tệ, dấu trong bằng chứng nguyên văn, confidence >=0.9 và mô tả hợp lệ. Không khớp thì REVIEW, không đoán thay bằng regex. Các định dạng tiền chưa đối chiếu được vẫn cần nhập tay.
+- Gemini generationConfig có responseJsonSchema, maxOutputTokens=600, temperature=0, timeout=12s; client 16s. Không đổi model đang cấu hình và mặc định chatbot/OCR khác.
+- Giới hạn một upstream đồng thời, 3 lần/phút/tài khoản, tối đa 1.000 bucket trong RAM; lỗi vẫn tính vào hạn mức. Cần bộ đếm chung nếu chạy nhiều instance.
+- Trả requires_confirmation=true và visibility_verified=false. Không có ví, transaction id hay thao tác ghi database trong service.
 
-Mặc định tính năng tắt. Trong môi trường thử riêng, cấu hình `FEATURE_BANK_NOTIFICATION_AI=true`, sau đó khởi động backend theo lịch bảo trì. Thay đổi `.env` không tự thay đổi tiến trình đang chạy. Không chỉnh `.env` hiện tại hoặc restart server ổn định để thử tính năng.
+## Client và hủy
 
-Các cờ cho hóa đơn định kỳ, giọng nói và phản hồi beta chưa được quảng bá trong API vì chưa có phần backend tương ứng. File START/STOP-BACKEND quản lý tiến trình, khác với cờ bật/tắt tính năng này.
+Quyền AI được nhớ theo tài khoản và có mục đặt lại. Không gửi chữ khi người dùng chọn Nhập tay, cờ tắt hoặc server cũ chưa có endpoint. Cùng source/nội dung cache RAM 2 phút; session/account/content khác không dùng lại. Feature flag cache 30s khi bật, 3s khi tắt; server vẫn kiểm tra mỗi extract. Không lưu nội dung vào kho quyền.
 
-## Tích hợp mobile và phần còn cần kiểm tra
+Hủy client abort HTTP/bỏ kết quả muộn. Upstream đã gửi có thể tiếp tục hoàn tất trong timeout; không hứa hủy xóa dữ liệu đã gửi tới provider. Chỉ Save/enqueue an toàn mới markProcessed.
 
-- Theo yêu cầu tối ưu thao tác, mobile hiện đọc trực tiếp chữ thông báo Android bằng lắc/chuông, mới nhất trước. Luồng chụp/crop/OCR đã gỡ; không gửi ảnh tới backend.
-- Luồng lắc phân tích cục bộ, không gọi endpoint AI này và chưa có UI AI trong form rút gọn. Adapter client cho phân tích chữ vẫn có kiểm thử để dùng khi bổ sung bước đồng ý sau này.
-- API nguồn luôn yêu cầu consent=true và kiểm tra/che lại dữ liệu; tuyệt đối không dựa vào việc client đã che.
-- Giữ mốc 55/55 kiểm thử (mock Gemini), TypeScript và ESLint đạt. Chưa thử model thật, deploy, sửa .env hay restart server ổn định.
-- Trước khi dùng AI thật: thiết kế bước xem/đồng ý gửi chữ, triển khai thử riêng, kiểm tra sự đồng ý, dữ liệu và upstream. Không tự bật theo thao tác lắc.
-- Kiểm tra native ở mobile/qa/BANK-NOTIFICATIONS.md; chưa có APK mới hay nghiệm thu cảm biến/notification thực.
+## Bằng chứng và phần chưa đạt
+
+- Backend 73/73 qua 5 bộ (flag/service/HTTP/Gemini/OCR); mobile 100/100 qua 9 bộ. TypeScript, ESLint và compile Kotlin đạt. Provider/model được mock.
+- Chưa gọi Gemini thật, chưa đo tốc độ/độ chính xác, chưa thử native notification/gesture trên máy thật. JSON hợp schema không có nghĩa là mọi dữ liệu đều đúng.
+- Trước sử dụng: deploy môi trường thử, bật FEATURE_BANK_NOTIFICATION_AI=true theo lịch restart đã được chấp thuận, thử bộ mẫu ẩn danh và lỗi/quota. Không sửa .env hoặc restart server ổn định chỉ để thử.
+- Checklist thiết bị: mobile/qa/BANK-NOTIFICATIONS.md. Snapshot notification không chứng minh heads-up banner nào đang nổi.
+
+Tham khảo API: https://ai.google.dev/api/generate-content#generationconfig

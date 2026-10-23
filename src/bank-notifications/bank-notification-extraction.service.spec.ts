@@ -75,13 +75,13 @@ describe('bank notification text extraction', () => {
     expect(result).not.toHaveProperty('transaction_id');
   });
   it.each(['Số dư: 14.533.072 VND', 'Giao dịch +100.000 VND và -20.000 VND'])(
-    'requires manual review without sending ambiguous money to AI: %s',
+    'lets AI inspect safe ambiguous input, then rejects unsupported answers: %s',
     async (text) => {
       expect(await service.extract(7, { text, consent: true })).toMatchObject({
         status: 'REVIEW',
         amount: null,
       });
-      expect(respond).not.toHaveBeenCalled();
+      expect(respond).toHaveBeenCalledTimes(1);
     },
   );
   it.each([
@@ -155,7 +155,7 @@ describe('bank notification text extraction', () => {
         status: 'REVIEW',
         amount: null,
       });
-      expect(respond).not.toHaveBeenCalled();
+      expect(respond).toHaveBeenCalledTimes(1);
     },
   );
   it('does not discard transaction money because the banner title mentions balance changes', () => {
@@ -189,7 +189,7 @@ describe('bank notification text extraction', () => {
         status: 'REVIEW',
         amount: null,
       });
-      expect(respond).not.toHaveBeenCalled();
+      expect(respond).toHaveBeenCalledTimes(1);
     },
   );
   it.each([
@@ -209,6 +209,83 @@ describe('bank notification text extraction', () => {
       status: 'REVIEW',
       amount: null,
     });
+  });
+  it('lets AI select the transaction among a principal and a fee', async () => {
+    respond.mockResolvedValue({
+      message: JSON.stringify({
+        ...valid,
+        type: 'EXPENSE',
+        amount: 100000,
+        evidence: 'Ghi nợ -100.000 VND',
+        note: 'CF',
+      }),
+    });
+    expect(
+      await service.extract(7, {
+        text: 'Ghi nợ -100.000 VND; phí -5.000 VND. Số dư 900.000 VND',
+        consent: true,
+      }),
+    ).toMatchObject({
+      status: 'READY',
+      type: 'EXPENSE',
+      amount: 100000,
+      note: 'CF',
+    });
+    expect((respond.mock.calls as unknown[][])[0]?.[0]).toMatchObject({
+      responseMimeType: 'application/json',
+      maxOutputTokens: 600,
+      timeoutMs: 12000,
+      responseJsonSchema: { type: 'object' },
+    });
+  });
+  it('accepts AI interpretation of an unfamiliar direction label instead of a direction keyword regex', async () => {
+    respond.mockResolvedValue({
+      message: JSON.stringify({
+        ...valid,
+        amount: 125000,
+        evidence: 'CR 125.000 VND',
+      }),
+    });
+    expect(
+      await service.extract(7, {
+        text: 'CR 125.000 VND. Balance 500.000 VND',
+        consent: true,
+      }),
+    ).toMatchObject({ status: 'READY', type: 'INCOME', amount: 125000 });
+  });
+  it('checks the sign in the exact evidence even if the same amount also appears unsigned', async () => {
+    respond.mockResolvedValue({
+      message: JSON.stringify({
+        ...valid,
+        amount: 10000,
+        type: 'EXPENSE',
+        evidence: 'Nhận +10.000 VND',
+      }),
+    });
+    expect(
+      await service.extract(7, {
+        text: 'Nhận +10.000 VND. Phí 10.000 VND',
+        consent: true,
+      }),
+    ).toMatchObject({ status: 'REVIEW', amount: null });
+  });
+  it('does not synthesize fields when AI returns an uncertain or non-transaction answer', async () => {
+    respond.mockResolvedValue({
+      message: JSON.stringify({
+        type: null,
+        amount: null,
+        currency: null,
+        note: '',
+        evidence: '',
+        confidence: 0,
+      }),
+    });
+    expect(await service.extract(7, input)).toMatchObject({
+      status: 'REVIEW',
+      type: null,
+      amount: null,
+    });
+    expect(respond).toHaveBeenCalledTimes(1);
   });
   it('limits costs per account and allows another account to use its own allowance', async () => {
     for (let attempt = 0; attempt < 3; attempt++)

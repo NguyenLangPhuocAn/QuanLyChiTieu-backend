@@ -39,6 +39,8 @@ export class GeminiClient {
     maxOutputTokens: number;
     temperature: number;
     responseMimeType?: string;
+    responseJsonSchema?: Record<string, unknown>;
+    timeoutMs?: number;
     unavailableMessage: string;
   }) {
     const apiKey = process.env.GEMINI_API_KEY?.trim();
@@ -54,7 +56,10 @@ export class GeminiClient {
       'https://generativelanguage.googleapis.com/v1beta'
     ).replace(/\/$/, '');
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30_000);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      input.timeoutMs ?? 30_000,
+    );
 
     try {
       const encodedModel = encodeURIComponent(model);
@@ -76,6 +81,9 @@ export class GeminiClient {
               temperature: input.temperature,
               ...(input.responseMimeType
                 ? { responseMimeType: input.responseMimeType }
+                : {}),
+              ...(input.responseJsonSchema
+                ? { responseJsonSchema: input.responseJsonSchema }
                 : {}),
             },
           }),
@@ -106,7 +114,9 @@ export class GeminiClient {
       };
     } catch (error) {
       if (error instanceof HttpException) throw error;
-      const timedOut = error instanceof Error && error.name === 'AbortError';
+      const timedOut =
+        controller.signal.aborted ||
+        (error instanceof Error && error.name === 'AbortError');
       this.logger.warn(
         timedOut ? 'Gemini request timed out' : 'Gemini request failed',
       );
@@ -124,6 +134,10 @@ export class GeminiClient {
     instructions: string;
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
     responseMimeType?: 'application/json';
+    responseJsonSchema?: Record<string, unknown>;
+    maxOutputTokens?: number;
+    temperature?: number;
+    timeoutMs?: number;
   }) {
     return this.generate({
       instructions: input.instructions,
@@ -131,9 +145,11 @@ export class GeminiClient {
         role: message.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: message.content }],
       })),
-      maxOutputTokens: 900,
-      temperature: 0.3,
+      maxOutputTokens: input.maxOutputTokens ?? 900,
+      temperature: input.temperature ?? 0.3,
       responseMimeType: input.responseMimeType,
+      responseJsonSchema: input.responseJsonSchema,
+      timeoutMs: input.timeoutMs,
       unavailableMessage: 'Chatbot chưa thể trả lời lúc này',
     });
   }
