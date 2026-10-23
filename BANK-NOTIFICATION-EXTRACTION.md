@@ -1,6 +1,6 @@
 # Trích xuất nội dung thông báo — source thử nghiệm
 
-Ngày: 23/10/2026. Chưa triển khai lên server đang chạy. Source mobile đã có phiên chụp/crop/OCR và nút đồng ý gửi chữ; chưa có APK mới hoặc thử thiết bị thật.
+Ngày: 23/10/2026. Chưa triển khai lên server đang chạy. Source mobile đã đổi sang đọc chữ thông báo trực tiếp qua lắc/chuông, không gọi AI trong luồng rút gọn; chưa có APK mới hoặc thử thiết bị thật.
 
 ## Phạm vi đã có
 
@@ -20,9 +20,9 @@ Các cờ cho hóa đơn định kỳ, giọng nói và phản hồi beta chưa 
 
 ## Tích hợp mobile và phần còn cần kiểm tra
 
-- Người dùng đã chọn quyền chụp màn hình theo phiên. Mobile chụp khi bấm chuông, chọn vùng một banner và OCR trên máy; không gửi ảnh vào endpoint này.
-- App hiển thị phần chữ đã che để xin đồng ý trước mỗi lần gọi AI. Khi cờ tắt/endpoint chưa có, báo rõ và cho nhập tay; không làm hỏng luồng OCR cục bộ.
-- Phân tích cục bộ và backend cùng bỏ số dư, kể cả nhãn/số nằm khác dòng OCR. Backend vẫn kiểm tra lại dữ liệu; không tin dữ liệu client.
-- 55/55 kiểm thử mới (mock Gemini), TypeScript và ESLint đạt. Chưa thử model thật trong môi trường thử; chưa có bằng chứng độ chính xác banner trên thiết bị thật.
-- Trước khi sử dụng AI thật: triển khai thử riêng, kiểm tra sự đồng ý, dữ liệu đầu vào và lỗi upstream. Không bật cờ hoặc restart server ổn định trong đợt này.
-- Kiểm tra cache, quyền, ảnh không có banner, OEM chặn chụp, đa thông báo và thu hồi quyền theo `mobile/qa/BANK-BANNER-CAPTURE.md`.
+- Theo yêu cầu tối ưu thao tác, mobile hiện đọc trực tiếp chữ thông báo Android bằng lắc/chuông, mới nhất trước. Luồng chụp/crop/OCR đã gỡ; không gửi ảnh tới backend.
+- Luồng lắc phân tích cục bộ, không gọi endpoint AI này và chưa có UI AI trong form rút gọn. Adapter client cho phân tích chữ vẫn có kiểm thử để dùng khi bổ sung bước đồng ý sau này.
+- API nguồn luôn yêu cầu consent=true và kiểm tra/che lại dữ liệu; tuyệt đối không dựa vào việc client đã che.
+- Giữ mốc 55/55 kiểm thử (mock Gemini), TypeScript và ESLint đạt. Chưa thử model thật, deploy, sửa .env hay restart server ổn định.
+- Trước khi dùng AI thật: thiết kế bước xem/đồng ý gửi chữ, triển khai thử riêng, kiểm tra sự đồng ý, dữ liệu và upstream. Không tự bật theo thao tác lắc.
+- Kiểm tra native ở mobile/qa/BANK-NOTIFICATIONS.md; chưa có APK mới hay nghiệm thu cảm biến/notification thực.
