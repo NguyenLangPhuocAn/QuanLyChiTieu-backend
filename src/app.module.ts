@@ -22,6 +22,8 @@ import { ChatbotModule } from './chatbot/chatbot.module';
 import { PaymentsModule } from './payments/payments.module';
 import { FinancialPlansModule } from './financial-plans/financial-plans.module';
 import { PersonalBackupModule } from './personal-backup/personal-backup.module';
+import { FeaturesModule } from './features/features.module';
+import { BankNotificationsModule } from './bank-notifications/bank-notifications.module';
 
 @Module({
   imports: [
@@ -53,6 +55,8 @@ import { PersonalBackupModule } from './personal-backup/personal-backup.module';
     PaymentsModule,
     FinancialPlansModule,
     PersonalBackupModule,
+    FeaturesModule,
+    BankNotificationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
