@@ -20,3 +20,11 @@
 5. Thực hiện luồng Android theo `mobile/qa/LOCAL-ANDROID.md`. Khi hết buổi thử, dừng đúng tiến trình QA, không restart/deploy server production hoặc mở tunnel.
 
 Việc tạo schema cần quyền quản trị MySQL cục bộ. Tài khoản ứng dụng production có thể bị từ chối CREATE DATABASE; đó là giới hạn đúng, không phải lỗi API. Script không nâng quyền tài khoản production.
+
+## Fixture gợi ý khoản chi lặp — 27/10/2026
+
+- `node scripts/bill-suggestions-qa.cjs --prepare` tạo thêm tài khoản/ví riêng và9khoản chi giả trong đúng schema QA đã chuẩn bị. Không migrate/reset, không thay tài khoản/ví/hai giao dịch cũ. Chỉ cho MySQL loopback và tên schema QA đúng tiền tố. Internet có3kỳ biến thiên240–260nghìn; Video/Music mỗi nhóm3kỳ cố định. Số dư ví mới8.848.000đ.
+- Session mới lưu ở `.runtime/bill-suggestions-qa/session.json`, luôn ngoài Git. Nếu file đã có, lệnh chỉ đối chiếu fixture, không seed thêm. Mật khẩu/JWT/database URL không được in vào biên bản.
+- Server vẫn dùng `node scripts/run-recurring-bills-qa.cjs`, chỉ cổng local trống như trên. `node scripts/verify-bill-suggestions-http-qa.cjs` đăng nhập thật bằng tài khoản mới, kiểm tra profile và GET lịch sử9/9, chỉ ghi bằng chứng không chứa token.
+- `node scripts/bill-suggestions-qa.cjs` kiểm tra9ID/nội dung/ngày/số tiền và số dư mới; chạy thêm `node scripts/inspect-recurring-bills-qa.cjs` xác nhận2giao dịch/số dư cũ giữ nguyên. Luồng Android local và75ảnh nằm trong repo mobile ở `qa/evidence/2026-10-27-bill-suggestions/`.
+- Không đổi logic ứng dụng backend trong batch này. Các script chỉ phục vụ QA; không bật AI, sửa `.env`, restart production hoặc mở tunnel. Kết thúc kiểm thử dừng đúng tiến trình QA do buổi thử tạo.
