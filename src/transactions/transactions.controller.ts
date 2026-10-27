@@ -33,6 +33,7 @@ import { UpdateTransactionDto } from './dto/update-transaction.dto';
 import { TransactionsService } from './transactions.service';
 import { ReceiptOcrService } from './receipt-ocr.service';
 import { parseQueryInteger } from './parse-query-integer';
+import { parsePaymentLinkIds } from './payment-link-ids';
 
 type AuthenticatedRequest = Request & {
   user: {
@@ -101,6 +102,14 @@ export class TransactionsController {
       page: parseQueryInteger(page, 'Trang'),
       limit: parseQueryInteger(limit, 'Số kết quả'),
     });
+  }
+
+  @Get('linked-payments')
+  linkedPayments(@Req() req: AuthenticatedRequest, @Query('ids') ids?: string) {
+    return this.transactionsService.linkedPayments(
+      req.user.userId,
+      parsePaymentLinkIds(ids),
+    );
   }
 
   @Post()

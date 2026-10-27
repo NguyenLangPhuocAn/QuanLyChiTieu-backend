@@ -1,5 +1,13 @@
 # Backend/MySQL riêng cho kiểm thử hóa đơn định kỳ
 
+## Đối chiếu liên kết — fixture28/10
+
+- `node scripts/payment-links-qa.cjs --prepare` tạo tài khoản/ví/khoản chi mới riêng trong schema QA đã có, không migrate/reset hoặc thay hai fixture trước. Session ở `.runtime/payment-links-qa/session.json`, ngoài Git. Nếu session đã có thì chỉ kiểm tra, không seed lại.
+- Chạy runner QA trên cổng3000 trống theo hướng dẫn bên dưới. `--http` đăng nhập thật, kiểm endpoint mới, xác nhận ID thuộc fixture khác không bị đọc, thiếuJWT401 và ID trùng400. Không in token/mật khẩu.
+- `--change` PUT đúng khoản chi của fixture mới từ310k sang330k/note mới; `--delete` DELETE đúng khoản đó. Cả hai xác nhận tài khoản, quyền sở hữu ví/giao dịch trước khi gọi. Đây là mutation tiền thật trong database thử, không dùng với database/người dùng production. Không nhận ID tùy ý.
+- Lệnh không có cờ là inspector:1giao dịch/ví690k trước sửa,1/ví670k sau sửa,0/ví1triệu sau xóa. Kiểm tra/cập nhật liên kết trong app không đổi các mốc này. Sau DELETE, prepare không phục hồi khoản đã xóa; nếu cần chu trình mới phải chủ động chuẩn bị fixture mới ngoài phiên cũ, không tự reset.
+- Biên bản64ảnh Android local/source ở mobile/qa/evidence/2026-10-28-payment-links/. Endpoint có source/test trong backend nhưng không tự deploy/restart server ổn định.
+
 Đây là môi trường local dùng source Nest hiện tại và MySQL thật; không phải API mock. Không migrate/reset/seed database đang dùng.
 
 ## Chuẩn bị schema mới

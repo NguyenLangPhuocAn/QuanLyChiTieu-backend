@@ -26,6 +26,7 @@ import {
   TransactionType,
 } from './dto/create-transaction.dto';
 import { UpdateTransactionDto } from './dto/update-transaction.dto';
+import { validatePaymentLinkIds } from './payment-link-ids';
 
 type TransactionWithCategory = transactions & {
   category?: categories | null;
@@ -804,6 +805,58 @@ export class TransactionsService {
     }
 
     return fallbackType;
+  }
+
+  async linkedPayments(userId: number, ids: number[]) {
+    validatePaymentLinkIds(ids);
+    // One bounded, owner-scoped query. Do not filter by amount/date/category:
+    // a changed transaction must be returned so the client can disclose it.
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        id: number;
+        wallet_id: number;
+        amount: Prisma.Decimal;
+        currency: string;
+        transaction_date: Date;
+        note: string | null;
+        category_id: number | null;
+        category_name: string | null;
+        category_type: categories_type | null;
+        cash_flow_group: categories['cash_flow_group'] | null;
+      }>
+    >`
+      SELECT t.id, t.wallet_id, t.amount,
+        COALESCE(t.currency, w.currency) AS currency,
+        t.transaction_date, t.note, c.id AS category_id,
+        c.name AS category_name, c.type AS category_type, c.cash_flow_group
+      FROM transactions t
+      INNER JOIN wallets w ON w.id = t.wallet_id
+      LEFT JOIN categories c ON c.id = t.category_id
+      WHERE w.user_id = ${userId} AND t.id IN (${Prisma.join(ids)})
+      ORDER BY t.id
+    `;
+    const found = new Set(rows.map((row) => row.id));
+    return {
+      requestedIds: ids,
+      missingIds: ids.filter((id) => !found.has(id)),
+      data: rows.map((row) => ({
+        id: row.id,
+        wallet_id: row.wallet_id,
+        amount: row.amount.toString(),
+        currency: row.currency,
+        transaction_date: row.transaction_date.toISOString(),
+        note: row.note,
+        type: this.getTypeFromSignedAmount(row.amount),
+        category: row.category_id
+          ? {
+              id: row.category_id,
+              name: row.category_name,
+              type: row.category_type,
+              cash_flow_group: row.cash_flow_group,
+            }
+          : null,
+      })),
+    };
   }
 
   async findAll(userId: number, query: TransactionQuery = {}) {
