@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  Body,
   Controller,
   Post,
   Query,
@@ -13,7 +12,6 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
 import { memoryStorage } from 'multer';
 import { JwtGuard } from '../auth/jwt.guard';
-import { PersonalBackupPasswordDto } from './dto/personal-backup.dto';
 import { PersonalBackupService } from './personal-backup.service';
 
 type AuthenticatedRequest = Request & { user: { userId: number } };
@@ -38,11 +36,8 @@ export class PersonalBackupController {
   constructor(private readonly service: PersonalBackupService) {}
 
   @Post('export')
-  export(
-    @Req() req: AuthenticatedRequest,
-    @Body() body: PersonalBackupPasswordDto,
-  ) {
-    return this.service.export(req.user.userId, body.password);
+  export(@Req() req: AuthenticatedRequest) {
+    return this.service.export(req.user.userId);
   }
 
   @Post('preview')
@@ -50,10 +45,9 @@ export class PersonalBackupController {
   preview(
     @Req() req: AuthenticatedRequest,
     @UploadedFile() file: Express.Multer.File,
-    @Body() body: PersonalBackupPasswordDto,
   ) {
     if (!file) throw new BadRequestException('Vui lòng chọn file backup.');
-    return this.service.preview(req.user.userId, file.buffer, body.password);
+    return this.service.preview(req.user.userId, file.buffer);
   }
 
   @Post('restore')
@@ -61,8 +55,8 @@ export class PersonalBackupController {
   restore(
     @Req() req: AuthenticatedRequest,
     @UploadedFile() file: Express.Multer.File,
-    @Body() body: PersonalBackupPasswordDto,
     @Query('rows') rows?: string,
+    @Query('fileHash') fileHash?: string,
   ) {
     if (!file) throw new BadRequestException('Vui lòng chọn file backup.');
     const selectedRows = new Set(
@@ -82,8 +76,8 @@ export class PersonalBackupController {
     return this.service.restore(
       req.user.userId,
       file.buffer,
-      body.password,
       selectedRows,
+      fileHash ?? '',
     );
   }
 }

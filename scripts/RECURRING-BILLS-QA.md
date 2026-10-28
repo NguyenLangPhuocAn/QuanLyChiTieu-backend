@@ -42,3 +42,7 @@ Việc tạo schema cần quyền quản trị MySQL cục bộ. Tài khoản �
 Chạy node scripts/bill-activity-qa.cjs --prepare một lần trên QA schema loopback đã tạo bởi recurring-bills-qa. Chỉ nhận database nova_qa_bills_20261026_<số>, không reset/migrate hoặc dùng database hiện tại. Tạo tài khoản/ví riêng: Internet 100k tháng7/8/9,130k tháng10; Video89k tháng7/8/9 và hai khoản tháng10. Tổng9giao dịch, ví1.125.000đ. Lưu session chứa mật khẩu/JWT/dbURL trong .runtime bị ignore, không đưa lên Git.
 
 Lần sau chạy không tham số chỉ đọc và kiểm đúng ID/ngày/tiền/nội dung/số dư. --http kiểm đăng nhập và lịch sử thật trên127.0.0.1:3000, chỉ xuất trạng thái và dữ liệu thử; không in thông tin xác thực. Không có tùy chọn sửa/xóa fixture đã tồn tại. Helper type-local-login hỗ trợ NOVA_QA_LOGIN_SET=bill-activity, chỉ nhập vào com.mobile.dev. Đợt này không đổi logic backend ứng dụng, không deploy server ổn định.
+
+## C2a file thường — 28/10/2026
+
+run-bill-backup-qa.cjs chạy source Nest trên loopback3301, schema nova_qa_bills_20261026_* từ session QA ignore; không chạy migration/reset hoặc đụng server3000. plain-backup-qa.cjs --prepare tạo QAuser5/ví1triệu riêng nếu chưa có, không sửa fixture cũ; không in bí mật. Mặc định export/preview/kiểm trùng/tamper/JWT; --confirm-restore chỉ ghi1khoản79k sau xem trước vào QA5. Chạy lại không flag để kiểm nhập lại400/số dư không đổi. Fixture/session/proof nằm .runtime ignore. File sao lưu lịch chỉ xử lý local; không có API/mật khẩu/mã hóa cho book. Backup giao dịch thay endpoint cũ bằng JSON thường và checksum file khi restore. Chưa deploy.

@@ -7,10 +7,6 @@ import {
   TransactionType,
 } from '../transactions/dto/create-transaction.dto';
 import { TransactionsService } from '../transactions/transactions.service';
-import {
-  decryptPersonalBackup,
-  encryptPersonalBackup,
-} from './personal-backup.crypto';
 
 const BACKUP_FORMAT = 'SO_THU_CHI_NOVA_PERSONAL_BACKUP';
 const BACKUP_VERSION = 1;
@@ -69,14 +65,14 @@ export class PersonalBackupService {
           wallet: input.wallet.trim().toLocaleLowerCase('vi'),
           currency: input.currency.trim().toUpperCase(),
           amount: new Prisma.Decimal(input.amount).toFixed(2),
-          date: new Date(input.date).toISOString(),
+          date: new Date(input.date).toISOString().slice(0, 10),
           note: input.note?.trim().toLocaleLowerCase('vi') ?? '',
         }),
       )
       .digest('hex');
   }
 
-  async export(userId: number, password: string) {
+  async export(userId: number) {
     const wallets = await this.prisma.wallets.findMany({
       where: { user_id: userId, deleted_at: null },
       select: {
@@ -193,12 +189,12 @@ export class PersonalBackupService {
         ];
       }),
     };
-    const encrypted = encryptPersonalBackup(payload, password);
+    const bytes = Buffer.from(JSON.stringify(payload), 'utf8');
     const date = payload.createdAt.slice(0, 10);
     return {
       filename: `so-thu-chi-nova-${date}.stcn-backup`,
       mimeType: 'application/vnd.sothuchinova.backup+json',
-      base64: encrypted.toString('base64'),
+      base64: bytes.toString('base64'),
       summary: {
         createdAt: payload.createdAt,
         dataTypes: payload.dataTypes,
@@ -208,14 +204,23 @@ export class PersonalBackupService {
     };
   }
 
-  private readPayload(file: Buffer, password: string) {
+  private readPayload(file: Buffer) {
     if (file.length > 25 * 1024 * 1024) {
       throw new BadRequestException('File backup vượt quá 25 MB.');
     }
-    const payload = decryptPersonalBackup<BackupPayload>(file, password);
+    let payload: BackupPayload;
+    try {
+      payload = JSON.parse(file.toString('utf8')) as BackupPayload;
+    } catch {
+      throw new BadRequestException('File backup không phải JSON hợp lệ.');
+    }
     if (
-      payload.format !== BACKUP_FORMAT ||
+      payload?.format !== BACKUP_FORMAT ||
       payload.version !== BACKUP_VERSION ||
+      typeof payload.createdAt !== 'string' ||
+      !Number.isFinite(Date.parse(payload.createdAt)) ||
+      !Array.isArray(payload.dataTypes) ||
+      payload.dataTypes.some((value) => typeof value !== 'string') ||
       !Array.isArray(payload.transactions) ||
       payload.transactions.length > 10_000
     ) {
@@ -280,7 +285,40 @@ export class PersonalBackupService {
     );
 
     const rows: PreviewRow[] = payload.transactions.map((row, index) => {
-      const normalized = { ...row, row: index + 1 };
+      if (
+        !row ||
+        !['INCOME', 'EXPENSE'].includes(row.type) ||
+        typeof row.wallet?.name !== 'string' ||
+        typeof row.wallet?.currency !== 'string' ||
+        (row.category !== null &&
+          (!row.category ||
+            typeof row.category.name !== 'string' ||
+            row.category.type !== row.type ||
+            typeof row.category.cashFlowGroup !== 'string')) ||
+        typeof row.amount !== 'string' ||
+        typeof row.transactionDate !== 'string' ||
+        (row.note !== null && typeof row.note !== 'string') ||
+        !Array.isArray(row.tags) ||
+        row.tags.some((tag) => typeof tag !== 'string') ||
+        (row.receiptItems !== null && !Array.isArray(row.receiptItems))
+      ) {
+        return {
+          row: index + 1,
+          wallet: { name: 'Không rõ ví', currency: 'VND' },
+          category: null,
+          type: 'EXPENSE',
+          amount: '0',
+          note: null,
+          transactionDate: '',
+          receiptItems: null,
+          tags: [],
+          status: 'INVALID',
+          reason: 'Dòng dữ liệu không hợp lệ.',
+        };
+      }
+      // Transactions use a calendar day (UTC midnight), including restored rows.
+      const day = row.transactionDate.slice(0, 10);
+      const normalized = { ...row, row: index + 1, transactionDate: day };
       const wallet = walletsByKey.get(
         `${row.wallet?.name?.trim().toLocaleLowerCase('vi')}|${row.wallet?.currency?.toUpperCase()}`,
       );
@@ -296,7 +334,10 @@ export class PersonalBackupService {
             `${row.category.name.trim().toLocaleLowerCase('vi')}|${row.category.type}`,
           )
         : undefined;
-      if (row.category?.cashFlowGroup !== 'NORMAL') {
+      if (
+        row.category?.cashFlowGroup !== 'NORMAL' ||
+        (category && category.cash_flow_group !== 'NORMAL')
+      ) {
         return {
           ...normalized,
           status: 'INVALID',
@@ -315,7 +356,16 @@ export class PersonalBackupService {
       }
       try {
         const amount = new Prisma.Decimal(row.amount);
-        if (!amount.isFinite() || amount.lessThanOrEqualTo(0))
+        if (
+          !amount.isFinite() ||
+          amount.lessThanOrEqualTo(0) ||
+          amount.greaterThan('9999999999999.99') ||
+          amount.decimalPlaces() > 2 ||
+          (wallet.currency === 'VND' && !amount.isInteger()) ||
+          !/^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(row.transactionDate) ||
+          !Number.isFinite(Date.parse(row.transactionDate)) ||
+          new Date(`${day}T00:00:00.000Z`).toISOString().slice(0, 10) !== day
+        )
           throw new Error();
         const fingerprint = this.fingerprint({
           wallet: wallet.name,
@@ -331,11 +381,12 @@ export class PersonalBackupService {
           return {
             ...normalized,
             status: 'DUPLICATE',
-            reason: 'Đã có giao dịch cùng ví, tiền, thời gian và ghi chú.',
+            reason: 'Đã có giao dịch cùng ví, tiền, ngày và ghi chú.',
             walletId: wallet.id,
             categoryId: category?.id,
           };
         }
+        existingFingerprints.add(fingerprint);
       } catch {
         return {
           ...normalized,
@@ -356,13 +407,14 @@ export class PersonalBackupService {
     return rows;
   }
 
-  async preview(userId: number, file: Buffer, password: string) {
-    const payload = this.readPayload(file, password);
+  async preview(userId: number, file: Buffer) {
+    const payload = this.readPayload(file);
     const rows = await this.buildPreview(userId, payload);
     const count = (status: PreviewRow['status']) =>
       rows.filter((row) => row.status === status).length;
     return {
       metadata: {
+        fileHash: createHash('sha256').update(file).digest('hex'),
         version: payload.version,
         createdAt: payload.createdAt,
         dataTypes: payload.dataTypes,
@@ -380,10 +432,17 @@ export class PersonalBackupService {
   async restore(
     userId: number,
     file: Buffer,
-    password: string,
     selectedRows: Set<number>,
+    expectedHash: string,
   ) {
-    const payload = this.readPayload(file, password);
+    if (
+      !/^[a-f0-9]{64}$/.test(expectedHash) ||
+      createHash('sha256').update(file).digest('hex') !== expectedHash
+    )
+      throw new BadRequestException(
+        'File đã thay đổi. Hãy xem trước lại trước khi khôi phục.',
+      );
+    const payload = this.readPayload(file);
     const previewRows = await this.buildPreview(userId, payload);
     const selected = previewRows.filter(
       (row) => selectedRows.has(row.row) && row.status === 'READY',
