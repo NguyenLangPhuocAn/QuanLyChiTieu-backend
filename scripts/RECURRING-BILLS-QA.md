@@ -36,3 +36,9 @@ Việc tạo schema cần quyền quản trị MySQL cục bộ. Tài khoản �
 - Server vẫn dùng `node scripts/run-recurring-bills-qa.cjs`, chỉ cổng local trống như trên. `node scripts/verify-bill-suggestions-http-qa.cjs` đăng nhập thật bằng tài khoản mới, kiểm tra profile và GET lịch sử9/9, chỉ ghi bằng chứng không chứa token.
 - `node scripts/bill-suggestions-qa.cjs` kiểm tra9ID/nội dung/ngày/số tiền và số dư mới; chạy thêm `node scripts/inspect-recurring-bills-qa.cjs` xác nhận2giao dịch/số dư cũ giữ nguyên. Luồng Android local và75ảnh nằm trong repo mobile ở `qa/evidence/2026-10-27-bill-suggestions/`.
 - Không đổi logic ứng dụng backend trong batch này. Các script chỉ phục vụ QA; không bật AI, sửa `.env`, restart production hoặc mở tunnel. Kết thúc kiểm thử dừng đúng tiến trình QA do buổi thử tạo.
+
+## Fixture C1 — 28/10/2026
+
+Chạy node scripts/bill-activity-qa.cjs --prepare một lần trên QA schema loopback đã tạo bởi recurring-bills-qa. Chỉ nhận database nova_qa_bills_20261026_<số>, không reset/migrate hoặc dùng database hiện tại. Tạo tài khoản/ví riêng: Internet 100k tháng7/8/9,130k tháng10; Video89k tháng7/8/9 và hai khoản tháng10. Tổng9giao dịch, ví1.125.000đ. Lưu session chứa mật khẩu/JWT/dbURL trong .runtime bị ignore, không đưa lên Git.
+
+Lần sau chạy không tham số chỉ đọc và kiểm đúng ID/ngày/tiền/nội dung/số dư. --http kiểm đăng nhập và lịch sử thật trên127.0.0.1:3000, chỉ xuất trạng thái và dữ liệu thử; không in thông tin xác thực. Không có tùy chọn sửa/xóa fixture đã tồn tại. Helper type-local-login hỗ trợ NOVA_QA_LOGIN_SET=bill-activity, chỉ nhập vào com.mobile.dev. Đợt này không đổi logic backend ứng dụng, không deploy server ổn định.
