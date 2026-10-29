@@ -42,4 +42,10 @@ export class CreateLoanDebtDto {
   @IsOptional()
   @IsDateString({}, { message: 'Ngày giao dịch chưa hợp lệ.' })
   transaction_date?: string;
+
+  @IsOptional()
+  @Matches(/^[a-zA-Z0-9_-]{16,64}$/, {
+    message: 'Mã yêu cầu vay/nợ chưa hợp lệ.',
+  })
+  client_request_id?: string;
 }

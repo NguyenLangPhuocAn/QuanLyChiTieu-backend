@@ -16,6 +16,12 @@ describe('LoanDebtsService', () => {
 
   const makeService = () => {
     const tx = {
+      notifications: {
+        create: jest
+          .fn<Promise<{ id: number }>, [Prisma.notificationsCreateArgs]>()
+          .mockResolvedValue({ id: 501 }),
+        update: jest.fn(),
+      },
       $queryRaw: jest.fn(),
       categories: {
         findFirst: jest.fn(),
@@ -44,6 +50,7 @@ describe('LoanDebtsService', () => {
       },
     };
     const prisma = {
+      notifications: { findFirst: jest.fn() },
       wallets: { findFirst: jest.fn().mockResolvedValue(wallet) },
       users: {
         findUnique: jest.fn().mockResolvedValue({ currency_default: 'VND' }),
@@ -116,6 +123,77 @@ describe('LoanDebtsService', () => {
       );
     },
   );
+
+  it('replays a loan request without a second loan, transaction or balance change, and rejects changed content', async () => {
+    const { service, prisma, tx } = makeService();
+    jest.spyOn(service, 'findOne').mockResolvedValue({ id: 301 } as never);
+    const dto = {
+      person_name: 'QA',
+      type: LoanDebtType.BORROWED,
+      principal_amount: '100000',
+      wallet_id: 10,
+      transaction_date: '2026-10-30',
+      client_request_id: 'widget_loan_request_1234',
+    };
+    await service.create(1, dto);
+    const marker = tx.notifications.create.mock.calls[0][0].data;
+    expect(marker).toMatchObject({
+      source_type: 'CLIENT_LOAN_DEBT_REQUEST',
+      dedupe_key: 'loan_client:widget_loan_request_1234',
+      deleted_at: expect.any(Date),
+    });
+    expect(tx.notifications.update).toHaveBeenCalledWith({
+      where: { id: 501 },
+      data: { source_id: 301 },
+    });
+    (prisma.notifications.findFirst as jest.Mock).mockResolvedValue({
+      message: marker.message,
+      source_id: 301,
+    } as never);
+    await expect(
+      service.create(1, { ...dto, principal_amount: '100000.00' }),
+    ).resolves.toMatchObject({ id: 301 });
+    expect(tx.loan_debts.create).toHaveBeenCalledTimes(1);
+    expect(tx.transactions.create).toHaveBeenCalledTimes(1);
+    expect(tx.wallets.updateMany).toHaveBeenCalledTimes(1);
+    await expect(
+      service.create(1, { ...dto, principal_amount: '100001' }),
+    ).rejects.toThrow('đã được xử lý');
+    const markerCalls = (prisma.notifications.findFirst as jest.Mock).mock
+      .calls as Array<[{ where: { user_id: number } }]>;
+    expect(markerCalls.at(-1)?.[0].where.user_id).toBe(1);
+  });
+
+  it('returns the committed winner when a concurrent request hits the unique marker', async () => {
+    const { service, prisma, tx } = makeService();
+    jest.spyOn(service, 'findOne').mockResolvedValue({ id: 302 } as never);
+    (prisma.notifications.findFirst as jest.Mock)
+      .mockResolvedValueOnce(null)
+      .mockImplementationOnce(
+        async () =>
+          ({
+            message: tx.notifications.create.mock.calls[0][0].data.message,
+            source_id: 302,
+          }) as never,
+      );
+    tx.notifications.create.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('unique', {
+        code: 'P2002',
+        clientVersion: '5.22.0',
+      }),
+    );
+    await expect(
+      service.create(1, {
+        person_name: 'QA',
+        type: LoanDebtType.LENT,
+        principal_amount: '50000',
+        wallet_id: 10,
+        client_request_id: 'widget_loan_race_12345',
+      }),
+    ).resolves.toMatchObject({ id: 302 });
+    expect(tx.transactions.create).not.toHaveBeenCalled();
+    expect(tx.wallets.updateMany).not.toHaveBeenCalled();
+  });
 
   it.each(['2026-02-30', '2026-13-01', '2026-00-01', '2026-06-00'])(
     'rejects an impossible calendar date %s instead of moving it to another month',

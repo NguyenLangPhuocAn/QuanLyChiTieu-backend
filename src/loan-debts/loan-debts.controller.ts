@@ -1,5 +1,6 @@
 import {
   Body,
+  BadRequestException,
   Controller,
   Delete,
   Get,
@@ -41,6 +42,15 @@ export class LoanDebtsController {
 
   @Post()
   create(@Req() req: AuthRequest, @Body() dto: CreateLoanDebtDto) {
+    return this.service.create(req.user.userId, dto);
+  }
+
+  // A separate endpoint fails closed on older servers that would strip the
+  // optional request key and could create a second loan after a timeout.
+  @Post('quick-entry')
+  createQuickEntry(@Req() req: AuthRequest, @Body() dto: CreateLoanDebtDto) {
+    if (!dto.client_request_id)
+      throw new BadRequestException('Thiếu mã chống ghi trùng vay/nợ.');
     return this.service.create(req.user.userId, dto);
   }
 

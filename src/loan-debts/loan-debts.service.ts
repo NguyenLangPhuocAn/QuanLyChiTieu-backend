@@ -15,6 +15,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateLoanDebtDto, LoanDebtType } from './dto/create-loan-debt.dto';
 import { CreateLoanDebtPaymentDto } from './dto/create-loan-debt-payment.dto';
 import { UpdateLoanDebtDto } from './dto/update-loan-debt.dto';
+import { createHash } from 'node:crypto';
 
 type LoanDebtFilter = {
   type?: LoanDebtType;
@@ -254,9 +255,53 @@ export class LoanDebtsService {
     return this.decorate(record);
   }
 
+  private async duplicateRequest(userId: number, key: string, hash: string) {
+    const marker = await this.prisma.notifications.findFirst({
+      where: {
+        user_id: userId,
+        dedupe_key: key,
+        source_type: 'CLIENT_LOAN_DEBT_REQUEST',
+      },
+      select: { message: true, source_id: true },
+    });
+    if (!marker) return null;
+    if (marker.message !== hash || !marker.source_id)
+      throw new ConflictException(
+        'Yêu cầu vay/nợ này đã được xử lý. Kiểm tra sổ vay/nợ trước khi nhập lại.',
+      );
+    return this.findOne(userId, marker.source_id);
+  }
+
   async create(userId: number, dto: CreateLoanDebtDto) {
-    const wallet = await this.ownedWallet(userId, dto.wallet_id);
     const principal = this.positiveAmount(dto.principal_amount);
+    const transactionDate = this.parseDate(dto.transaction_date);
+    const dueDate = this.parseDate(dto.due_date);
+    if (
+      dto.client_request_id &&
+      !/^[a-zA-Z0-9_-]{16,64}$/.test(dto.client_request_id)
+    )
+      throw new BadRequestException('Mã yêu cầu vay/nợ chưa hợp lệ.');
+    const key = dto.client_request_id
+      ? `loan_client:${dto.client_request_id.toLowerCase()}`
+      : null;
+    const hash = createHash('sha256')
+      .update(
+        JSON.stringify({
+          person_name: dto.person_name.trim(),
+          type: dto.type,
+          amount: principal.toFixed(2),
+          wallet_id: dto.wallet_id,
+          transaction_date: transactionDate?.toISOString() ?? null,
+          due_date: dueDate?.toISOString() ?? null,
+          note: dto.note?.trim() || null,
+        }),
+      )
+      .digest('hex');
+    if (key) {
+      const duplicate = await this.duplicateRequest(userId, key, hash);
+      if (duplicate) return duplicate;
+    }
+    const wallet = await this.ownedWallet(userId, dto.wallet_id);
     const signed = this.signedAmount(dto.type, principal, false);
     const snapshot = await this.conversionSnapshot(
       userId,
@@ -264,37 +309,77 @@ export class LoanDebtsService {
       wallet.currency,
     );
 
-    const id = await this.prisma.$transaction(async (tx) => {
-      const category = await this.ensureCategory(tx, dto.type, false);
-      const transaction = await tx.transactions.create({
-        data: {
-          wallet_id: wallet.id,
-          category_id: category.id,
-          amount: signed,
-          ...snapshot,
-          note:
-            dto.note ??
-            `${this.categoryMeta(dto.type, false).name}: ${dto.person_name.trim()}`,
-          transaction_date: this.parseDate(dto.transaction_date) ?? new Date(),
-        },
+    let id: number;
+    try {
+      id = await this.prisma.$transaction(async (tx) => {
+        const marker = key
+          ? await tx.notifications.create({
+              data: {
+                user_id: userId,
+                type: 'SYSTEM',
+                severity: 'INFO',
+                title: 'Chống ghi trùng vay/nợ',
+                message: hash,
+                source_type: 'CLIENT_LOAN_DEBT_REQUEST',
+                dedupe_key: key,
+                read_at: new Date(),
+                deleted_at: new Date(),
+              },
+              select: { id: true },
+            })
+          : null;
+        const category = await this.ensureCategory(tx, dto.type, false);
+        const transaction = await tx.transactions.create({
+          data: {
+            wallet_id: wallet.id,
+            category_id: category.id,
+            amount: signed,
+            ...snapshot,
+            note:
+              dto.note ??
+              `${this.categoryMeta(dto.type, false).name}: ${dto.person_name.trim()}`,
+            transaction_date: transactionDate ?? new Date(),
+          },
+        });
+        await this.adjustBalance(
+          tx,
+          userId,
+          wallet.id,
+          wallet.currency,
+          signed,
+        );
+        const record = await tx.loan_debts.create({
+          data: {
+            user_id: userId,
+            person_name: dto.person_name.trim(),
+            type: dto.type,
+            principal_amount: principal,
+            currency: wallet.currency,
+            due_date: dueDate,
+            note: dto.note,
+            opening_wallet_id: wallet.id,
+            opening_transaction_id: transaction.id,
+            status: 'OPEN',
+          },
+        });
+        if (marker)
+          await tx.notifications.update({
+            where: { id: marker.id },
+            data: { source_id: record.id },
+          });
+        return record.id;
       });
-      await this.adjustBalance(tx, userId, wallet.id, wallet.currency, signed);
-      const record = await tx.loan_debts.create({
-        data: {
-          user_id: userId,
-          person_name: dto.person_name.trim(),
-          type: dto.type,
-          principal_amount: principal,
-          currency: wallet.currency,
-          due_date: this.parseDate(dto.due_date),
-          note: dto.note,
-          opening_wallet_id: wallet.id,
-          opening_transaction_id: transaction.id,
-          status: 'OPEN',
-        },
-      });
-      return record.id;
-    });
+    } catch (error) {
+      if (
+        key &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        const duplicate = await this.duplicateRequest(userId, key, hash);
+        if (duplicate) return duplicate;
+      }
+      throw error;
+    }
     return this.findOne(userId, id);
   }
 
