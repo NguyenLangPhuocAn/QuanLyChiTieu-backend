@@ -24,6 +24,7 @@ import { FinancialPlansModule } from './financial-plans/financial-plans.module';
 import { PersonalBackupModule } from './personal-backup/personal-backup.module';
 import { FeaturesModule } from './features/features.module';
 import { BankNotificationsModule } from './bank-notifications/bank-notifications.module';
+import { PlanningSyncModule } from './planning-sync/planning-sync.module';
 
 @Module({
   imports: [
@@ -57,6 +58,7 @@ import { BankNotificationsModule } from './bank-notifications/bank-notifications
     PersonalBackupModule,
     FeaturesModule,
     BankNotificationsModule,
+    PlanningSyncModule,
   ],
   controllers: [AppController],
   providers: [AppService],

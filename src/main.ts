@@ -5,11 +5,13 @@ import { loadEnvFile } from './env';
 import { UploadExceptionFilter } from './common/upload/upload-exception.filter';
 import { serverAddress } from './server-config';
 import compression from 'compression';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 
 async function bootstrap() {
   loadEnvFile();
   const { port, host } = serverAddress();
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  app.useBodyParser('json', { limit: '1mb' });
   app.use(compression());
   app.enableShutdownHooks();
   app.enableCors();
