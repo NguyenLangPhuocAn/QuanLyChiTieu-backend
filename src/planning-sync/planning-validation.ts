@@ -26,7 +26,7 @@ const money = (v: unknown, code: unknown) =>
     ? Number.isInteger(v)
     : Math.abs(v * 100 - Math.round(v * 100)) < 0.00001);
 const cycle = (v: unknown) =>
-  ['WEEKLY', 'MONTHLY', 'YEARLY'].includes(String(v));
+  ['WEEKLY', 'MONTHLY', 'QUARTERLY', 'YEARLY'].includes(String(v));
 const list = (v: unknown, max: number): unknown[] => {
   if (!Array.isArray(v) || v.length > max) fail();
   return v as unknown[];
@@ -47,7 +47,10 @@ const due = (bill: Data, value: unknown): boolean => {
   const months = (y - ay) * 12 + m - am;
   const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
   return (
-    d === Math.min(ad, last) && (bill.cycle === 'MONTHLY' || months % 12 === 0)
+    d === Math.min(ad, last) &&
+    months %
+      (bill.cycle === 'YEARLY' ? 12 : bill.cycle === 'QUARTERLY' ? 3 : 1) ===
+      0
   );
 };
 export const validatePlanningItems = (bookValue: unknown, plans: unknown) => {
@@ -107,7 +110,7 @@ export const validatePlanningItems = (bookValue: unknown, plans: unknown) => {
     const s = object(value);
     if (
       typeof s.key !== 'string' ||
-      !/^bill-suggest:v1:[A-Z]{3}:(WEEKLY|MONTHLY|YEARLY):[a-z0-9 ]{3,160}$/.test(
+      !/^bill-suggest:v1:[A-Z]{3}:(WEEKLY|MONTHLY|QUARTERLY|YEARLY):[a-z0-9 ]{3,160}$/.test(
         s.key,
       ) ||
       !['IGNORED', 'LATER', 'TRACKED'].includes(String(s.status)) ||

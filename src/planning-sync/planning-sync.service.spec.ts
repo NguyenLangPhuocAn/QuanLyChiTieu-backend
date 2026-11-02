@@ -36,6 +36,34 @@ const plan = {
   currency: 'VND',
   amount: 5000000,
 };
+describe('quarterly planning compatibility', () => {
+  const snapshot = () => ({
+    ...empty(),
+    book: {
+      version: 1,
+      bills: [{ ...bill, cycle: 'QUARTERLY', startDate: '2026-10-31' }],
+      periods: [{ billId: bill.id, dueDate: '2027-01-31', status: 'SKIPPED' }],
+      suggestions: [
+        {
+          key: 'bill-suggest:v1:VND:QUARTERLY:fpt internet',
+          status: 'TRACKED',
+          billId: bill.id,
+        },
+      ],
+    },
+  });
+  it('accepts quarterly schedules and source decisions without changing old monthly payloads', () => {
+    expect(JSON.parse(validatePlanningPayload(snapshot()))).toEqual(snapshot());
+  });
+  it.each(['2027-02-28', '2027-04-29', '2026-07-31'])(
+    'rejects non-quarterly or pre-tracking period %s',
+    (date) => {
+      const s = snapshot();
+      s.book.periods[0].dueDate = date;
+      expect(() => validatePlanningPayload(s)).toThrow(BadRequestException);
+    },
+  );
+});
 describe('planning payload validation', () => {
   const full = () => ({
     ...empty(),
