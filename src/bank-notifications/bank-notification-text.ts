@@ -29,6 +29,17 @@ function stripBalances(input: string) {
     if (/(?:bien dong|thay doi|changes? (?:to|in))\s*$/.test(prefix)) continue;
     const afterLabel = start + label[0].length;
     const tail = input.slice(afterLabel);
+    // VCB uses "Số dư TK ... +5,000 VND" for the transaction itself.
+    // Keep that signed change, while removing the later actual balance.
+    if (
+      /^\s*(?:tk|tài khoản|tai khoan)\b[^\r\n;.!?]{0,70}[+-]\s*\d[\d.,]*\s*(?:vnd|vnđ|đ|₫|usd)\b/iu.test(
+        tail,
+      )
+    ) {
+      output += `${input.slice(cursor, start)}Biến động`;
+      cursor = afterLabel;
+      continue;
+    }
     // Decimal/grouping periods stay in the clause; a period before a new sentence ends it.
     const leadingWhitespace = tail.length - tail.trimStart().length;
     const boundary = tail
@@ -124,6 +135,11 @@ export function prepareBankNotificationText(input: string) {
     );
   }
   let text = stripBalances(input)
+    .replace(
+      /\b(?:lúc|luc|vào lúc|vao luc)\s+\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2})?/giu,
+      '',
+    )
+    .replace(/-\d{6,8}-\d{1,2}:\d{2}(?::\d{2})?(?:\s+.*)?$/u, '')
     .replace(/\s+/g, ' ')
     .trim()
     .replace(
@@ -146,4 +162,22 @@ export function prepareBankNotificationText(input: string) {
     text = text.replace(`__MONEY_${String.fromCharCode(65 + index)}__`, value);
   });
   return { text, money: readVisibleMoney(text) };
+}
+
+/** A note is sourced only from the notification's Ref/description field. */
+export function bankNotificationDescription(text: string) {
+  const match =
+    /(?:^|\s)(?:ref(?:erence)?|nội dung|noi dung|nd)\s*[:#=-]?\s+(.+)$/iu.exec(
+      text,
+    );
+  if (!match) return '';
+  const note = match[1]
+    .replace(/\[ĐÃ [^\]]+\]/gu, '')
+    .replace(/-\d{6,8}-\d{1,2}:\d{2}(?::\d{2})?.*$/u, '')
+    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b.*$/u, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[.,;:-]+$/u, '')
+    .trim();
+  return /\p{L}{2}/u.test(note) ? note.slice(0, 180) : '';
 }

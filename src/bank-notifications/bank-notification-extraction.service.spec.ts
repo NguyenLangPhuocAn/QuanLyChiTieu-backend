@@ -7,6 +7,7 @@ import { GeminiClient } from '../chatbot/gemini.client';
 import { FeatureFlagsService } from '../features/feature-flags.service';
 import { BankNotificationExtractionService } from './bank-notification-extraction.service';
 import {
+  bankNotificationDescription,
   prepareBankNotificationText,
   readVisibleMoney,
 } from './bank-notification-text';
@@ -33,6 +34,39 @@ describe('bank notification text extraction', () => {
     expect(
       prepareBankNotificationText('Nhận tiền\nSố dư\n+15.000.000 VND').money,
     ).toEqual([]);
+  });
+  it('keeps the signed VCB transaction while removing balance, time and machine reference', () => {
+    const prepared = prepareBankNotificationText(
+      'Thông báo VCB\nSố dư TK VCB 1234567890 +5,000 VND lúc 03-11-2026 13:48:16. Số dư 131,687 VND. Ref TRAN MINH AN CHUYEN KHOAN-031126-13:48:16 PCxk087163#SP#020097041611031348162026',
+    );
+    expect(prepared.money).toMatchObject([
+      { amount: 5000, currency: 'VND', direction: 'INCOME' },
+    ]);
+    expect(prepared.text).not.toMatch(/131,687|1234567890|13:48:16|PCxk087163/);
+    expect(bankNotificationDescription(prepared.text)).toBe(
+      'TRAN MINH AN CHUYEN KHOAN',
+    );
+    expect(prepareBankNotificationText(prepared.text).money).toMatchObject([
+      { amount: 5000, direction: 'INCOME' },
+    ]);
+  });
+  it('still removes a VCB balance without a signed change', () => {
+    const prepared = prepareBankNotificationText(
+      'Số dư TK VCB 1234567890 131,687 VND. Ref SO DU CUOI NGAY',
+    );
+    expect(prepared.money).toEqual([]);
+    expect(prepared.text).not.toContain('131,687');
+  });
+  it('keeps a signed VCB debit as an expense', () => {
+    const prepared = prepareBankNotificationText(
+      'Số dư TK VCB 1234567890 -7,000 VND. Số dư 124,687 VND. Nội dung: THANH TOAN CA PHE',
+    );
+    expect(prepared.money).toMatchObject([
+      { amount: 7000, currency: 'VND', direction: 'EXPENSE' },
+    ]);
+    expect(bankNotificationDescription(prepared.text)).toBe(
+      'THANH TOAN CA PHE',
+    );
   });
   let respond: jest.Mock;
   let flags: { isBankNotificationAiEnabled: jest.Mock };
@@ -73,6 +107,27 @@ describe('bank notification text extraction', () => {
     });
     expect(result).not.toHaveProperty('wallet_id');
     expect(result).not.toHaveProperty('transaction_id');
+  });
+  it('extracts the VCB income and uses only Ref as the note', async () => {
+    respond.mockResolvedValue({
+      message: JSON.stringify({
+        ...valid,
+        amount: 5000,
+        evidence: '+5,000 VND',
+        note: 'Số dư 131,687 VND lúc 13:48:16',
+      }),
+    });
+    const result = await service.extract(7, {
+      text: 'Số dư TK VCB 1234567890 +5,000 VND lúc 03-11-2026 13:48:16. Số dư 131,687 VND. Ref TRAN MINH AN CHUYEN KHOAN-031126-13:48:16 PCxk087163',
+      consent: true,
+    });
+    expect(result).toMatchObject({
+      status: 'READY',
+      type: 'INCOME',
+      amount: 5000,
+      note: 'TRAN MINH AN CHUYEN KHOAN',
+    });
+    expect(JSON.stringify(respond.mock.calls)).not.toMatch(/131,687|13:48:16/);
   });
   it.each(['Số dư: 14.533.072 VND', 'Giao dịch +100.000 VND và -20.000 VND'])(
     'lets AI inspect safe ambiguous input, then rejects unsupported answers: %s',
@@ -229,7 +284,7 @@ describe('bank notification text extraction', () => {
       status: 'READY',
       type: 'EXPENSE',
       amount: 100000,
-      note: 'CF',
+      note: '',
     });
     expect((respond.mock.calls as unknown[][])[0]?.[0]).toMatchObject({
       responseMimeType: 'application/json',
