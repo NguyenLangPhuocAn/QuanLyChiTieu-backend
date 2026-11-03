@@ -78,6 +78,13 @@ describe('planning payload validation', () => {
     expect(JSON.parse(validatePlanningPayload(full()))).toEqual(full());
     expect(() => validatePlanningPayload(empty())).not.toThrow();
   });
+  it('preserves an optional expense category on a recurring bill and rejects invalid ids', () => {
+    const value = full();
+    value.book.bills[0] = { ...bill, categoryId: 7 } as typeof bill;
+    expect(validatePlanningPayload(value)).toContain('"categoryId":7');
+    value.book.bills[0] = { ...bill, categoryId: -1 } as typeof bill;
+    expect(() => validatePlanningPayload(value)).toThrow(BadRequestException);
+  });
   it.each([
     (v: ReturnType<typeof full>) => {
       v.plans.push(plan);

@@ -75,6 +75,8 @@ export const validatePlanningItems = (bookValue: unknown, plans: unknown) => {
       b.note.length > 500 ||
       typeof b.paused !== 'boolean' ||
       typeof b.archived !== 'boolean' ||
+      (b.categoryId !== undefined &&
+        (!Number.isSafeInteger(b.categoryId) || Number(b.categoryId) <= 0)) ||
       (b.reminderEnabled !== undefined &&
         typeof b.reminderEnabled !== 'boolean') ||
       (b.startDate !== undefined &&
