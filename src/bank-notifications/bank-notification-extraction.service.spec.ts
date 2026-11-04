@@ -50,6 +50,18 @@ describe('bank notification text extraction', () => {
       { amount: 5000, direction: 'INCOME' },
     ]);
   });
+  it('keeps the ACB ONE signed change before its balance and reference', () => {
+    const prepared = prepareBankNotificationText(
+      'Thông báo thay đổi số dư tài khoản\nACB: TK 23664527(VND) + 752,790 lúc 07:22 20/10/2026. Số dư 14,533,072. GD: HSP41313637408790 102015437352 GD 6293MCOBQ2CNHBHZ 201026-07:22:40',
+    );
+    expect(prepared.money).toMatchObject([
+      { amount: 752790, currency: 'VND', direction: 'INCOME' },
+    ]);
+    expect(prepared.text).not.toMatch(/23664527|14,533,072|07:22:40|HSP413/);
+    expect(prepareBankNotificationText(prepared.text).money).toMatchObject([
+      { amount: 752790, currency: 'VND', direction: 'INCOME' },
+    ]);
+  });
   it('still removes a VCB balance without a signed change', () => {
     const prepared = prepareBankNotificationText(
       'Số dư TK VCB 1234567890 131,687 VND. Ref SO DU CUOI NGAY',
@@ -107,6 +119,17 @@ describe('bank notification text extraction', () => {
     });
     expect(result).not.toHaveProperty('wallet_id');
     expect(result).not.toHaveProperty('transaction_id');
+  });
+  it('accepts ACB evidence with normalized currency placement when one signed amount is visible', async () => {
+    respond.mockResolvedValue({
+      message: JSON.stringify({ ...valid, evidence: '+752,790 VND' }),
+    });
+    expect(
+      await service.extract(7, {
+        text: 'Thông báo thay đổi số dư tài khoản. ACB: TK 23664527(VND) + 752,790 lúc 07:22 20/10/2026. Số dư 14,533,072. GD: HSP41313637408790',
+        consent: true,
+      }),
+    ).toMatchObject({ status: 'READY', type: 'INCOME', amount: 752790 });
   });
   it('extracts the VCB income and uses only Ref as the note', async () => {
     respond.mockResolvedValue({

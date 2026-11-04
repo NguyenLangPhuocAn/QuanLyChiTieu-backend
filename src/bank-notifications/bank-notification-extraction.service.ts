@@ -182,6 +182,19 @@ export class BankNotificationExtractionService {
       const hasContext = evidencedMatches.some(
         (value) => evidence.replace(value.raw, '').trim().length >= 2,
       );
+      // Some models rewrite ACB's "(VND) + 752,790" as "+752,790 VND" in
+      // evidence. A single signed money value still anchors type and amount.
+      const uniqueSignedMatch =
+        prepared.money.length === 1 &&
+        matches.length === 1 &&
+        matches[0].direction === data.type &&
+        /^[-+]\s*\d[\d.,]*\s*(?:VND|VNĐ|đ|₫|USD)$/iu.test(evidence) &&
+        evidence
+          .replace(/\s/g, '')
+          .startsWith(
+            matches[0].raw.match(/[-+]\s*\d[\d.,]*/u)?.[0].replace(/\s/g, '') ??
+              '\0',
+          );
       if (
         (data.type !== 'INCOME' && data.type !== 'EXPENSE') ||
         typeof data.confidence !== 'number' ||
@@ -190,9 +203,9 @@ export class BankNotificationExtractionService {
         data.confidence > 1 ||
         !matches.length ||
         !evidence ||
-        !prepared.text.includes(evidence) ||
-        !evidencedMatches.length ||
-        (!selectedHasSign && !hasContext) ||
+        (!uniqueSignedMatch && !prepared.text.includes(evidence)) ||
+        (!uniqueSignedMatch && !evidencedMatches.length) ||
+        (!uniqueSignedMatch && !selectedHasSign && !hasContext) ||
         evidencedMatches.some(
           (value) => value.direction !== null && value.direction !== data.type,
         ) ||
