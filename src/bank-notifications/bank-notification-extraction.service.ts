@@ -182,19 +182,23 @@ export class BankNotificationExtractionService {
       const hasContext = evidencedMatches.some(
         (value) => evidence.replace(value.raw, '').trim().length >= 2,
       );
-      // Some models rewrite ACB's "(VND) + 752,790" as "+752,790 VND" in
-      // evidence. A single signed money value still anchors type and amount.
+      // Some models cite only "+ 752,790" or move VND after the amount.
+      // Permit that exact signed number only when the sanitized notice has a
+      // single signed money value matching the model's amount and direction.
+      const signedEvidence =
+        /^([+-]\s*\d[\d.,]*)(?:\s*(VND|VNĐ|đ|₫|USD))?$/iu.exec(evidence);
+      const visibleSignedNumber =
+        matches[0]?.raw.match(/[+-]\s*\d[\d.,]*/u)?.[0];
       const uniqueSignedMatch =
         prepared.money.length === 1 &&
         matches.length === 1 &&
         matches[0].direction === data.type &&
-        /^[-+]\s*\d[\d.,]*\s*(?:VND|VNĐ|đ|₫|USD)$/iu.test(evidence) &&
-        evidence
-          .replace(/\s/g, '')
-          .startsWith(
-            matches[0].raw.match(/[-+]\s*\d[\d.,]*/u)?.[0].replace(/\s/g, '') ??
-              '\0',
-          );
+        signedEvidence !== null &&
+        signedEvidence[1].replace(/\s/g, '') ===
+          visibleSignedNumber?.replace(/\s/g, '') &&
+        (!signedEvidence[2] ||
+          (signedEvidence[2].toUpperCase() === 'USD' ? 'USD' : 'VND') ===
+            data.currency);
       if (
         (data.type !== 'INCOME' && data.type !== 'EXPENSE') ||
         typeof data.confidence !== 'number' ||

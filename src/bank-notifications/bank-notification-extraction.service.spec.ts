@@ -131,6 +131,22 @@ describe('bank notification text extraction', () => {
       }),
     ).toMatchObject({ status: 'READY', type: 'INCOME', amount: 752790 });
   });
+  it('accepts the exact signed number without currency returned by Gemini for ACB', async () => {
+    respond.mockResolvedValue({
+      message: JSON.stringify({ ...valid, evidence: '+ 752,790' }),
+    });
+    expect(await service.extract(7, input)).toMatchObject({
+      status: 'READY',
+      type: 'INCOME',
+      amount: 752790,
+    });
+  });
+  it('rejects a signed amount evidence with extra digits', async () => {
+    respond.mockResolvedValue({
+      message: JSON.stringify({ ...valid, evidence: '+ 752,7900' }),
+    });
+    expect(await service.extract(7, input)).toMatchObject({ status: 'REVIEW' });
+  });
   it('extracts the VCB income and uses only Ref as the note', async () => {
     respond.mockResolvedValue({
       message: JSON.stringify({
