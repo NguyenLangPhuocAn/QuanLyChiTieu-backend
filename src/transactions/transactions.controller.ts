@@ -144,10 +144,12 @@ export class TransactionsController {
   async remove(
     @Req() req: AuthenticatedRequest,
     @Param('id', ParseIntPipe) id: number,
+    @Body('offline_expected') offlineExpected?: Record<string, unknown>,
   ) {
     const transaction = await this.transactionsService.remove(
       req.user.userId,
       id,
+      offlineExpected,
     );
 
     return transaction;

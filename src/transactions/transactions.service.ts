@@ -191,6 +191,54 @@ export class TransactionsService {
     }
   }
 
+  private async assertOfflineExpected(
+    tx: Prisma.TransactionClient,
+    id: number,
+    expected?: Record<string, unknown>,
+  ) {
+    if (expected === undefined) return;
+    if (!expected || typeof expected !== 'object' || Array.isArray(expected))
+      throw new BadRequestException('Bản đối chiếu giao dịch chưa hợp lệ.');
+    const latest = await tx.transactions.findUnique({
+      where: { id },
+      select: this.transactionSelect,
+    });
+    if (!latest) throw new NotFoundException('Giao dịch đã bị xóa.');
+    const tagRows = await tx.$queryRaw<Array<{ name: string }>>`
+      SELECT tags.name FROM transaction_tags tt
+      INNER JOIN tags ON tags.id = tt.tag_id
+      WHERE tt.transaction_id = ${id} ORDER BY tags.name
+    `;
+    const actual = {
+      id,
+      walletId: latest.wallet_id,
+      categoryId: latest.category_id,
+      amount: new Prisma.Decimal(latest.amount).abs().toFixed(2),
+      type: this.getTypeFromSignedAmount(new Prisma.Decimal(latest.amount)),
+      note: latest.note?.trim() ?? '',
+      date: latest.transaction_date.toISOString().slice(0, 10),
+      receiptImage: latest.receipt_image ?? null,
+      receiptItems: latest.receipt_items ?? [],
+      tags: tagRows.map((row) => row.name).sort(),
+    };
+    const normalizedExpected = {
+      id: expected.id,
+      walletId: expected.walletId,
+      categoryId: expected.categoryId,
+      amount: expected.amount,
+      type: expected.type,
+      note: expected.note,
+      date: expected.date,
+      receiptImage: expected.receiptImage,
+      receiptItems: expected.receiptItems,
+      tags: expected.tags,
+    };
+    if (JSON.stringify(actual) !== JSON.stringify(normalizedExpected))
+      throw new ConflictException(
+        'Giao dịch trên máy chủ đã thay đổi. Hãy xem lại trước khi đồng bộ.',
+      );
+  }
+
   private readonly transactionSelect = {
     id: true,
     wallet_id: true,
@@ -819,13 +867,15 @@ export class TransactionsService {
         currency: string;
         transaction_date: Date;
         note: string | null;
+        receipt_image: string | null;
+        receipt_items: Prisma.JsonValue | null;
         category_id: number | null;
         category_name: string | null;
         category_type: categories_type | null;
         cash_flow_group: categories['cash_flow_group'] | null;
       }>
     >`
-      SELECT t.id, t.wallet_id, t.amount,
+      SELECT t.id, t.wallet_id, t.amount, t.receipt_image, t.receipt_items,
         COALESCE(t.currency, w.currency) AS currency,
         t.transaction_date, t.note, c.id AS category_id,
         c.name AS category_name, c.type AS category_type, c.cash_flow_group
@@ -835,6 +885,22 @@ export class TransactionsService {
       WHERE w.user_id = ${userId} AND t.id IN (${Prisma.join(ids)})
       ORDER BY t.id
     `;
+    const tagRows = rows.length
+      ? await this.prisma.$queryRaw<
+          Array<{ transaction_id: number; name: string }>
+        >`
+          SELECT tt.transaction_id, tags.name
+          FROM transaction_tags tt INNER JOIN tags ON tags.id = tt.tag_id
+          WHERE tt.transaction_id IN (${Prisma.join(rows.map((row) => row.id))})
+          ORDER BY tags.name
+        `
+      : [];
+    const tagsById = new Map<number, string[]>();
+    for (const tag of tagRows)
+      tagsById.set(tag.transaction_id, [
+        ...(tagsById.get(tag.transaction_id) ?? []),
+        tag.name,
+      ]);
     const found = new Set(rows.map((row) => row.id));
     return {
       requestedIds: ids,
@@ -846,6 +912,10 @@ export class TransactionsService {
         currency: row.currency,
         transaction_date: row.transaction_date.toISOString(),
         note: row.note,
+        category_id: row.category_id,
+        receipt_image: row.receipt_image,
+        receipt_items: row.receipt_items,
+        tags: tagsById.get(row.id) ?? [],
         type: this.getTypeFromSignedAmount(row.amount),
         category: row.category_id
           ? {
@@ -1596,11 +1666,17 @@ export class TransactionsService {
 
     const currentSignedAmount = new Prisma.Decimal(current.amount);
     const currentType = this.getTypeFromSignedAmount(currentSignedAmount);
-    const nextType = await this.resolveType(
-      userId,
-      dto.category_id ?? current.category_id,
-      dto.type ?? currentType,
-    );
+    // A historic category may have been deactivated after this transaction was
+    // saved. Keep it for edits that do not change category or cash-flow type.
+    const nextType =
+      dto.category_id !== undefined ||
+      (dto.type !== undefined && dto.type !== currentType)
+        ? await this.resolveType(
+            userId,
+            dto.category_id ?? current.category_id,
+            dto.type ?? currentType,
+          )
+        : currentType;
     const nextSignedAmount =
       dto.amount !== undefined
         ? this.toSignedAmount(dto.amount, nextType)
@@ -1621,6 +1697,7 @@ export class TransactionsService {
 
     const updated = await this.prisma.$transaction(async (tx) => {
       await this.lockUnchangedTransaction(tx, current);
+      await this.assertOfflineExpected(tx, id, dto.offline_expected);
       if (current.wallet_id === nextWalletId) {
         await this.adjustWalletBalance(
           tx,
@@ -1703,7 +1780,11 @@ export class TransactionsService {
     return normalized;
   }
 
-  async remove(userId: number, id: number) {
+  async remove(
+    userId: number,
+    id: number,
+    offlineExpected?: Record<string, unknown>,
+  ) {
     const current = await this.prisma.transactions.findUnique({
       where: { id },
       select: this.transactionSelect,
@@ -1718,6 +1799,7 @@ export class TransactionsService {
     await this.assertNotLoanManaged(id);
     const deleted = await this.prisma.$transaction(async (tx) => {
       await this.lockUnchangedTransaction(tx, current);
+      await this.assertOfflineExpected(tx, id, offlineExpected);
       await tx.transaction_tags.deleteMany({
         where: { transaction_id: id },
       });

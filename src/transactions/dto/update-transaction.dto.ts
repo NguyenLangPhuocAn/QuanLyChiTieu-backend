@@ -5,12 +5,17 @@ import {
   IsEnum,
   IsInt,
   IsOptional,
+  IsObject,
   IsString,
   Matches,
 } from 'class-validator';
 import { TransactionType } from './create-transaction.dto';
 
 export class UpdateTransactionDto {
+  @IsOptional()
+  @IsObject()
+  offline_expected?: Record<string, unknown>;
+
   @IsOptional()
   @IsInt()
   wallet_id?: number;

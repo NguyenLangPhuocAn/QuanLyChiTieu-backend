@@ -14,6 +14,7 @@ const createPrismaMock = () => {
     transactions: {
       create: jest.fn(),
       update: jest.fn(),
+      findUnique: jest.fn(),
     },
     notifications: {
       create: jest.fn().mockResolvedValue({ id: 91 }),
@@ -749,12 +750,9 @@ describe('TransactionsService', () => {
     prisma.users.findUnique
       .mockResolvedValueOnce({ role: 'BASIC' })
       .mockResolvedValueOnce({ currency_default: 'VND' });
-    prisma.categories.findFirst.mockResolvedValue({
-      id: 3,
-      name: 'Food',
-      type: 'EXPENSE',
-      icon: null,
-    });
+    prisma.categories.findFirst.mockRejectedValue(
+      new Error('Inactive historic category must not be looked up'),
+    );
     prisma.categories.findMany.mockResolvedValue([
       { id: 3, name: 'Food', type: 'EXPENSE', icon: null },
     ]);
@@ -772,6 +770,7 @@ describe('TransactionsService', () => {
     });
 
     expect(currencyService.convertAmount).not.toHaveBeenCalled();
+    expect(prisma.categories.findFirst).not.toHaveBeenCalled();
     expect(prisma.tx.transactions.update).toHaveBeenCalledWith({
       where: { id: 10 },
       data: expect.objectContaining({
@@ -784,6 +783,53 @@ describe('TransactionsService', () => {
       }),
       select: expect.any(Object),
     });
+  });
+
+  it('rejects a stale offline edit under the transaction lock before changing the balance', async () => {
+    const prisma = createPrismaMock();
+    const row = {
+      id: 10,
+      wallet_id: 2,
+      category_id: 3,
+      amount: new Prisma.Decimal(-79000),
+      note: 'Đã sửa trên máy khác',
+      receipt_image: null,
+      receipt_items: null,
+      transaction_date: new Date('2026-11-13T00:00:00.000Z'),
+    };
+    prisma.transactions.findUnique.mockResolvedValue(row);
+    prisma.tx.transactions.findUnique.mockResolvedValue(row);
+    prisma.tx.$queryRaw.mockResolvedValueOnce([row]).mockResolvedValueOnce([]);
+    prisma.$queryRaw.mockResolvedValue([
+      { id: 2, user_id: 7, currency: 'VND' },
+    ]);
+    prisma.categories.findFirst.mockResolvedValue({ id: 3, type: 'EXPENSE' });
+    const service = new TransactionsService(
+      prisma as unknown as PrismaService,
+      {
+        normalizeCurrency: (value?: string | null) => value ?? 'VND',
+      } as CurrencyService,
+      {} as NotificationsService,
+    );
+    await expect(
+      service.update(7, 10, {
+        note: 'Nội dung trên máy',
+        offline_expected: {
+          id: 10,
+          walletId: 2,
+          categoryId: 3,
+          amount: '79000.00',
+          type: 'EXPENSE',
+          note: 'Bản cũ',
+          date: '2026-11-13',
+          receiptImage: null,
+          receiptItems: [],
+          tags: [],
+        },
+      }),
+    ).rejects.toThrow('đã thay đổi');
+    expect(prisma.tx.transactions.update).not.toHaveBeenCalled();
+    expect(prisma.tx.wallets.updateMany).not.toHaveBeenCalled();
   });
 
   it('updates wallet balance correctly when changing an expense to income', async () => {
