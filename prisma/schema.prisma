@@ -26,8 +26,10 @@ model categories {
   is_active       Boolean?                 @default(true)
   deleted_at      DateTime?                @db.DateTime(0)
   user_id         Int?
+  client_request_id String?                 @db.VarChar(80)
 
   @@index([user_id], map: "user_id")
+  @@unique([user_id, client_request_id], map: "categories_user_request_key")
 }
 
 model password_resets {

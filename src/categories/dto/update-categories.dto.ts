@@ -1,4 +1,10 @@
-import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsEnum,
+  IsObject,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
 import { CategoryCashFlowGroup, CategoryType } from './create-categories.dto';
 
 export class UpdateCategoryDto {
@@ -14,4 +20,21 @@ export class UpdateCategoryDto {
   @IsOptional()
   @IsEnum(CategoryCashFlowGroup)
   cash_flow_group?: CategoryCashFlowGroup;
+
+  @IsOptional()
+  @IsObject()
+  offline_expected?: CategoryExpectedSnapshot;
+}
+
+export type CategoryExpectedSnapshot = {
+  name: string;
+  type: CategoryType;
+  cash_flow_group: CategoryCashFlowGroup;
+  icon: string | null;
+};
+
+export class DeleteCategoryDto {
+  @IsOptional()
+  @IsObject()
+  offline_expected?: CategoryExpectedSnapshot;
 }

@@ -17,7 +17,9 @@ describe('CategoriesService', () => {
       findFirst: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
       findUnique: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
     },
   };
 
@@ -172,6 +174,175 @@ describe('CategoriesService', () => {
         user_id: 8,
       },
     });
+  });
+
+  it('returns the same category after a lost response to a keyed create', async () => {
+    const row = {
+      id: 31,
+      user_id: 8,
+      name: 'di cho',
+      type: CategoryType.EXPENSE,
+      cash_flow_group: CategoryCashFlowGroup.NORMAL,
+      is_active: true,
+      client_request_id: 'category_offline_12345',
+    };
+    prisma.users.findUnique.mockResolvedValue({ id: 8, role: 'PREMIUM' });
+    prisma.categories.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(row);
+    prisma.categories.create.mockResolvedValue(row);
+    const dto = {
+      name: 'Di cho',
+      type: CategoryType.EXPENSE,
+      client_request_id: row.client_request_id,
+    };
+
+    expect(await service.create(8, dto)).toEqual(row);
+    expect(await service.create(8, dto)).toEqual(row);
+    expect(prisma.categories.create).toHaveBeenCalledTimes(1);
+    expect(prisma.categories.create).toHaveBeenCalledWith({
+      data: {
+        name: 'di cho',
+        type: CategoryType.EXPENSE,
+        cash_flow_group: 'NORMAL',
+        is_system: false,
+        user_id: 8,
+        client_request_id: row.client_request_id,
+      },
+    });
+  });
+
+  it('rejects a different payload that reuses a category request key', async () => {
+    prisma.users.findUnique.mockResolvedValue({ id: 8, role: 'PREMIUM' });
+    prisma.categories.findFirst.mockResolvedValue({
+      id: 31,
+      user_id: 8,
+      name: 'di cho',
+      type: CategoryType.EXPENSE,
+      cash_flow_group: CategoryCashFlowGroup.NORMAL,
+      is_active: true,
+    });
+
+    await expect(
+      service.create(8, {
+        name: 'Khac',
+        type: CategoryType.EXPENSE,
+        client_request_id: 'category_offline_12345',
+      }),
+    ).rejects.toThrow('Mã yêu cầu đã dùng');
+    expect(prisma.categories.create).not.toHaveBeenCalled();
+  });
+
+  it('accepts a concurrent retry that reaches the duplicate-name check', async () => {
+    const row = {
+      id: 31,
+      user_id: 8,
+      name: 'di cho',
+      type: CategoryType.EXPENSE,
+      cash_flow_group: CategoryCashFlowGroup.NORMAL,
+      is_active: true,
+      client_request_id: 'category_offline_12345',
+    };
+    prisma.users.findUnique.mockResolvedValue({ id: 8, role: 'PREMIUM' });
+    prisma.categories.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(row);
+
+    expect(
+      await service.create(8, {
+        name: 'Di cho',
+        type: CategoryType.EXPENSE,
+        client_request_id: row.client_request_id,
+      }),
+    ).toEqual(row);
+    expect(prisma.categories.create).not.toHaveBeenCalled();
+  });
+
+  it('updates an offline category only while the server still has its original fields', async () => {
+    const row = {
+      id: 31,
+      user_id: 8,
+      name: 'di cho',
+      type: CategoryType.EXPENSE,
+      cash_flow_group: CategoryCashFlowGroup.NORMAL,
+      icon: null,
+      is_active: true,
+      is_system: false,
+    };
+    prisma.users.findUnique.mockResolvedValue({ id: 8, role: 'PREMIUM' });
+    prisma.categories.findUnique.mockResolvedValue(row);
+    prisma.categories.findFirst.mockResolvedValue(null);
+    prisma.categories.updateMany.mockResolvedValue({ count: 1 });
+    prisma.categories.findUniqueOrThrow.mockResolvedValue({
+      ...row,
+      name: 'sieu thi',
+    });
+
+    await service.update(8, 31, {
+      name: 'Sieu thi',
+      offline_expected: {
+        name: 'di cho',
+        type: CategoryType.EXPENSE,
+        cash_flow_group: CategoryCashFlowGroup.NORMAL,
+        icon: null,
+      },
+    });
+    expect(prisma.categories.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 31,
+        user_id: 8,
+        is_system: false,
+        name: 'di cho',
+        type: CategoryType.EXPENSE,
+        cash_flow_group: CategoryCashFlowGroup.NORMAL,
+        icon: null,
+        OR: [{ is_active: true }, { is_active: null }],
+      },
+      data: { name: 'sieu thi', type: undefined, cash_flow_group: undefined },
+    });
+    expect(prisma.categories.update).not.toHaveBeenCalled();
+
+    prisma.categories.updateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(
+      service.update(8, 31, {
+        name: 'Sieu thi',
+        offline_expected: {
+          name: 'di cho',
+          type: CategoryType.EXPENSE,
+          cash_flow_group: CategoryCashFlowGroup.NORMAL,
+          icon: null,
+        },
+      }),
+    ).rejects.toThrow('đã thay đổi');
+  });
+
+  it('does not delete a category that changed since the offline snapshot', async () => {
+    const row = {
+      id: 31,
+      user_id: 8,
+      name: 'di cho',
+      type: CategoryType.EXPENSE,
+      cash_flow_group: CategoryCashFlowGroup.NORMAL,
+      icon: null,
+      is_active: true,
+      is_system: false,
+    };
+    prisma.users.findUnique.mockResolvedValue({ id: 8, role: 'PREMIUM' });
+    prisma.categories.findUnique.mockResolvedValue(row);
+    prisma.categories.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      service.remove(8, 31, {
+        offline_expected: {
+          name: 'di cho',
+          type: CategoryType.EXPENSE,
+          cash_flow_group: CategoryCashFlowGroup.NORMAL,
+          icon: null,
+        },
+      }),
+    ).rejects.toThrow('đã thay đổi');
+    expect(prisma.categories.update).not.toHaveBeenCalled();
   });
 
   it('blocks updating a personal category to duplicate a visible system category', async () => {

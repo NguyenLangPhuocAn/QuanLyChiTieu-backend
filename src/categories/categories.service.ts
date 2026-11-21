@@ -1,4 +1,6 @@
 import {
+  ConflictException,
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -13,11 +15,42 @@ import {
 } from '../common/upload/category-icon-upload.helper';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCategoryDto } from './dto/create-categories.dto';
-import { UpdateCategoryDto } from './dto/update-categories.dto';
+import {
+  DeleteCategoryDto,
+  UpdateCategoryDto,
+  type CategoryExpectedSnapshot,
+} from './dto/update-categories.dto';
 
 @Injectable()
 export class CategoriesService implements OnModuleInit {
   constructor(private prisma: PrismaService) {}
+
+  private expectedCategoryWhere(
+    userId: number,
+    id: number,
+    expected: CategoryExpectedSnapshot,
+  ) {
+    if (
+      typeof expected?.name !== 'string' ||
+      !expected.name.trim() ||
+      !['INCOME', 'EXPENSE'].includes(expected.type) ||
+      !['NORMAL', 'LOAN_DEBT', 'SAVING_TRANSFER'].includes(
+        expected.cash_flow_group,
+      ) ||
+      (expected.icon !== null && typeof expected.icon !== 'string')
+    )
+      throw new BadRequestException('Bản gốc danh mục chưa hợp lệ');
+    return {
+      id,
+      user_id: userId,
+      is_system: false,
+      name: expected.name,
+      type: expected.type,
+      cash_flow_group: expected.cash_flow_group,
+      icon: expected.icon,
+      OR: [{ is_active: true }, { is_active: null }],
+    };
+  }
 
   private deduplicateVisibleCategories<
     T extends {
@@ -78,6 +111,30 @@ export class CategoriesService implements OnModuleInit {
 
     const name = dto.name.trim().toLowerCase();
     const isSystem = false;
+    const requestId = dto.client_request_id;
+    const matchesRequest = (category: {
+      name: string;
+      type: string;
+      cash_flow_group: string;
+      is_active: boolean | null;
+    }) =>
+      category.is_active !== false &&
+      category.name === name &&
+      String(category.type) === String(dto.type) &&
+      String(category.cash_flow_group) ===
+        String(dto.cash_flow_group ?? 'NORMAL');
+    if (requestId) {
+      const previous = await this.prisma.categories.findFirst({
+        where: { user_id: userId, client_request_id: requestId },
+      });
+      if (previous) {
+        if (!matchesRequest(previous))
+          throw new ConflictException(
+            'Mã yêu cầu đã dùng cho danh mục khác. Hãy đối chiếu trước khi gửi lại.',
+          );
+        return previous;
+      }
+    }
 
     const existed = await this.prisma.categories.findFirst({
       where: isSystem
@@ -98,18 +155,42 @@ export class CategoriesService implements OnModuleInit {
     });
 
     if (existed) {
+      if (
+        requestId &&
+        existed.user_id === userId &&
+        existed.client_request_id === requestId &&
+        matchesRequest(existed)
+      )
+        return existed;
       throw new ForbiddenException('Danh mục đã tồn tại');
     }
 
-    return this.prisma.categories.create({
-      data: {
-        name,
-        type: dto.type,
-        cash_flow_group: dto.cash_flow_group ?? 'NORMAL',
-        is_system: isSystem,
-        user_id: isSystem ? null : userId,
-      },
-    });
+    try {
+      return await this.prisma.categories.create({
+        data: {
+          name,
+          type: dto.type,
+          cash_flow_group: dto.cash_flow_group ?? 'NORMAL',
+          is_system: isSystem,
+          user_id: isSystem ? null : userId,
+          ...(requestId ? { client_request_id: requestId } : {}),
+        },
+      });
+    } catch (error) {
+      if (requestId && (error as { code?: string })?.code === 'P2002') {
+        const previous = await this.prisma.categories.findFirst({
+          where: { user_id: userId, client_request_id: requestId },
+        });
+        if (previous) {
+          if (!matchesRequest(previous))
+            throw new ConflictException(
+              'Mã yêu cầu đã dùng cho danh mục khác. Hãy đối chiếu trước khi gửi lại.',
+            );
+          return previous;
+        }
+      }
+      throw error;
+    }
   }
 
   async findAll(userId: number) {
@@ -212,6 +293,21 @@ export class CategoriesService implements OnModuleInit {
       throw new ForbiddenException('Không có quyền');
     }
 
+    if (dto.offline_expected) {
+      const written = await this.prisma.categories.updateMany({
+        where: this.expectedCategoryWhere(userId, id, dto.offline_expected),
+        data: {
+          name: newName ?? undefined,
+          type: dto.type,
+          cash_flow_group: dto.cash_flow_group,
+        },
+      });
+      if (written.count !== 1)
+        throw new ConflictException(
+          'Danh mục trên máy chủ đã thay đổi. Hãy đối chiếu lại.',
+        );
+      return this.prisma.categories.findUniqueOrThrow({ where: { id } });
+    }
     return this.prisma.categories.update({
       where: { id },
       data: {
@@ -222,7 +318,7 @@ export class CategoriesService implements OnModuleInit {
     });
   }
 
-  async remove(userId: number, id: number) {
+  async remove(userId: number, id: number, dto?: DeleteCategoryDto) {
     const [category, user] = await Promise.all([
       this.prisma.categories.findUnique({ where: { id } }),
       this.prisma.users.findUnique({ where: { id: userId } }),
@@ -248,6 +344,17 @@ export class CategoriesService implements OnModuleInit {
       throw new ForbiddenException('Không có quyền');
     }
 
+    if (dto?.offline_expected) {
+      const written = await this.prisma.categories.updateMany({
+        where: this.expectedCategoryWhere(userId, id, dto.offline_expected),
+        data: { is_active: false, deleted_at: new Date() },
+      });
+      if (written.count !== 1)
+        throw new ConflictException(
+          'Danh mục trên máy chủ đã thay đổi. Hãy đối chiếu lại.',
+        );
+      return this.prisma.categories.findUniqueOrThrow({ where: { id } });
+    }
     return this.prisma.categories.update({
       where: { id },
       data: {

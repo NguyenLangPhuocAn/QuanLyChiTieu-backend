@@ -5,6 +5,7 @@ import {
   MaxLength,
   IsOptional,
   IsBoolean,
+  Matches,
 } from 'class-validator';
 
 export enum CategoryType {
@@ -37,4 +38,9 @@ export class CreateCategoryDto {
   @IsOptional()
   @IsEnum(CategoryCashFlowGroup)
   cash_flow_group?: CategoryCashFlowGroup;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Za-z0-9_-]{16,80}$/)
+  client_request_id?: string;
 }

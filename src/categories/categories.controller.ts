@@ -17,7 +17,10 @@ import type { Request } from 'express';
 import { CategoriesService } from './categories.service';
 import { JwtGuard } from '../auth/jwt.guard';
 import { CreateCategoryDto } from './dto/create-categories.dto';
-import { UpdateCategoryDto } from './dto/update-categories.dto';
+import {
+  DeleteCategoryDto,
+  UpdateCategoryDto,
+} from './dto/update-categories.dto';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { join } from 'path';
 import {
@@ -79,8 +82,13 @@ export class CategoriesController {
   async remove(
     @Req() req: AuthenticatedRequest,
     @Param('id', ParseIntPipe) id: number,
+    @Body() dto: DeleteCategoryDto,
   ) {
-    const category = await this.categoriesService.remove(req.user.userId, id);
+    const category = await this.categoriesService.remove(
+      req.user.userId,
+      id,
+      dto,
+    );
 
     return category;
   }
