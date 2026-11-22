@@ -37,4 +37,9 @@ export class CreateWalletDto {
     message: `Loại ví chỉ hỗ trợ: ${WALLET_TYPES.join(', ')}`,
   })
   wallet_type?: WalletType;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-zA-Z0-9_-]{8,80}$/)
+  client_request_id?: string;
 }

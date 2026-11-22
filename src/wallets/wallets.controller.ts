@@ -14,6 +14,7 @@ import type { Request } from 'express';
 import { JwtGuard } from '../auth/jwt.guard';
 import { CreateWalletDto } from './dto/create-wallet.dto';
 import { UpdateWalletDto } from './dto/update-wallet.dto';
+import { DeleteWalletDto } from './dto/wallet-snapshot.dto';
 import { WalletsService } from './wallets.service';
 
 type AuthenticatedRequest = Request & {
@@ -62,8 +63,13 @@ export class WalletsController {
   async remove(
     @Req() req: AuthenticatedRequest,
     @Param('id', ParseIntPipe) id: number,
+    @Body() dto?: DeleteWalletDto,
   ) {
-    const wallet = await this.walletsService.remove(req.user.userId, id);
+    const wallet = await this.walletsService.remove(
+      req.user.userId,
+      id,
+      dto?.offline_expected,
+    );
 
     return wallet;
   }

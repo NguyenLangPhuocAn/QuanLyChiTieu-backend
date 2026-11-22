@@ -4,9 +4,12 @@
   IsString,
   MaxLength,
   Matches,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import { SUPPORTED_CURRENCIES } from '../../currency/currency.constants';
 import { WALLET_TYPES, type WalletType } from './create-wallet.dto';
+import { WalletSnapshotDto } from './wallet-snapshot.dto';
 
 export class UpdateWalletDto {
   @IsOptional()
@@ -34,4 +37,9 @@ export class UpdateWalletDto {
     message: `Loại ví chỉ hỗ trợ: ${WALLET_TYPES.join(', ')}`,
   })
   wallet_type?: WalletType;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => WalletSnapshotDto)
+  offline_expected?: WalletSnapshotDto;
 }

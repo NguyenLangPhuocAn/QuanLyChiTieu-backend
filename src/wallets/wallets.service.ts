@@ -5,11 +5,13 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { createHash } from 'crypto';
 import { CurrencyService } from '../currency/currency.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateWalletDto } from './dto/create-wallet.dto';
 import { UpdateWalletDto } from './dto/update-wallet.dto';
 import { WALLET_TYPES, type WalletType } from './dto/create-wallet.dto';
+import { WalletSnapshotDto } from './dto/wallet-snapshot.dto';
 
 type WalletRow = {
   id: number;
@@ -78,6 +80,15 @@ export class WalletsService {
     return WALLET_TYPES.includes(type as WalletType)
       ? (type as WalletType)
       : 'CASH';
+  }
+
+  private matchesSnapshot(wallet: WalletRow, expected: WalletSnapshotDto) {
+    return (
+      wallet.name === expected.name &&
+      wallet.wallet_type === expected.wallet_type &&
+      wallet.currency === expected.currency &&
+      new Prisma.Decimal(wallet.balance ?? 0).equals(expected.balance)
+    );
   }
 
   private async findWalletById(id: number) {
@@ -208,6 +219,42 @@ export class WalletsService {
       throw new BadRequestException('Tên ví không được để trống');
     }
 
+    const balance = this.toDecimal(dto.balance, '0') ?? new Prisma.Decimal(0);
+    const currency = this.currencyService.normalizeCurrency(
+      dto.currency ?? actor.currency_default,
+    );
+    const walletType = this.normalizeWalletType(dto.wallet_type);
+    if (walletType === 'SAVINGS') {
+      throw new BadRequestException(
+        'Ví tiết kiệm chỉ được tạo từ chức năng Mục tiêu tiết kiệm',
+      );
+    }
+    const requestHash = dto.client_request_id
+      ? createHash('sha256')
+          .update(
+            JSON.stringify([name, walletType, currency, balance.toFixed(2)]),
+          )
+          .digest('hex')
+      : null;
+    const findPreviousRequest = async () => {
+      if (!dto.client_request_id) return null;
+      const previous = await this.prisma.wallets.findFirst({
+        where: { user_id: userId, client_request_id: dto.client_request_id },
+      });
+      if (!previous) return null;
+      if (
+        previous.request_payload_hash !== requestHash ||
+        previous.is_active === false
+      )
+        throw new ConflictException(
+          'Mã yêu cầu đã dùng cho ví khác. Hãy đối chiếu trước khi gửi lại.',
+        );
+      const row = await this.findWalletById(previous.id);
+      return row ? this.decorateWallet(row, actor.currency_default) : null;
+    };
+    const previous = await findPreviousRequest();
+    if (previous) return previous;
+
     const existed = await this.prisma.wallets.findFirst({
       where: {
         user_id: userId,
@@ -232,29 +279,32 @@ export class WalletsService {
       throw new BadRequestException('Tài khoản BASIC chỉ được tạo tối đa 2 ví');
     }
 
-    const balance = this.toDecimal(dto.balance, '0') ?? new Prisma.Decimal(0);
-    const currency = this.currencyService.normalizeCurrency(
-      dto.currency ?? actor.currency_default,
-    );
-    const walletType = this.normalizeWalletType(dto.wallet_type);
-    if (walletType === 'SAVINGS') {
-      throw new BadRequestException(
-        'Ví tiết kiệm chỉ được tạo từ chức năng Mục tiêu tiết kiệm',
-      );
-    }
-
-    const walletId = await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`
-        INSERT INTO wallets (user_id, name, wallet_type, currency, balance, created_at)
-        VALUES (${userId}, ${name}, ${walletType}, ${currency}, ${balance}, NOW())
+    let walletId: number | undefined;
+    try {
+      walletId = await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`
+        INSERT INTO wallets (user_id, name, wallet_type, currency, balance, client_request_id, request_payload_hash, created_at)
+        VALUES (${userId}, ${name}, ${walletType}, ${currency}, ${balance}, ${dto.client_request_id ?? null}, ${requestHash}, NOW())
       `;
 
-      const rows = await tx.$queryRaw<Array<{ id: number }>>`
+        const rows = await tx.$queryRaw<Array<{ id: number }>>`
         SELECT LAST_INSERT_ID() AS id
       `;
 
-      return rows[0]?.id;
-    });
+        return rows[0]?.id;
+      });
+    } catch (error) {
+      if (
+        dto.client_request_id &&
+        (String((error as { code?: string })?.code) === 'P2002' ||
+          String((error as { code?: string })?.code) === 'P2010' ||
+          String((error as { code?: string })?.code) === '1062')
+      ) {
+        const repeated = await findPreviousRequest();
+        if (repeated) return repeated;
+      }
+      throw error;
+    }
 
     if (!walletId) {
       throw new BadRequestException('Không thể tạo ví');
@@ -352,6 +402,13 @@ export class WalletsService {
           'Số dư hoặc tiền tệ của ví vừa thay đổi. Vui lòng tải lại trước khi chỉnh sửa.',
         );
       }
+      if (
+        dto.offline_expected &&
+        !this.matchesSnapshot(current, dto.offline_expected)
+      )
+        throw new ConflictException(
+          'Ví trên máy chủ đã thay đổi. Hãy đối chiếu trước khi sửa.',
+        );
       if (nextCurrency && nextCurrency !== current.currency) {
         const transactionCount = await tx.transactions.count({
           where: { wallet_id: id },
@@ -424,7 +481,7 @@ export class WalletsService {
     return this.decorateWallet(updated, actor.currency_default);
   }
 
-  async remove(userId: number, id: number) {
+  async remove(userId: number, id: number, expected?: WalletSnapshotDto) {
     const wallet = await this.findWalletById(id);
 
     if (!wallet) {
@@ -446,6 +503,25 @@ export class WalletsService {
     }
 
     await this.prisma.$transaction(async (tx) => {
+      if (expected) {
+        const rows = await tx.$queryRaw<WalletRow[]>`
+          SELECT id, user_id, name, wallet_type, currency, balance, is_active, deleted_at, created_at
+          FROM wallets WHERE id = ${id} FOR UPDATE
+        `;
+        const current = rows[0];
+        if (
+          !current ||
+          current.user_id !== userId ||
+          current.deleted_at ||
+          current.is_active === false ||
+          current.is_active === 0
+        )
+          throw new NotFoundException('Không tìm thấy ví');
+        if (!this.matchesSnapshot(current, expected))
+          throw new ConflictException(
+            'Ví trên máy chủ đã thay đổi. Hãy đối chiếu trước khi xóa.',
+          );
+      }
       await tx.$executeRaw`
         UPDATE wallets
         SET is_active = 0, deleted_at = NOW()

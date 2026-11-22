@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Prisma } from '@prisma/client';
+import { createHash } from 'crypto';
 import { CurrencyService } from '../currency/currency.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletsService } from './wallets.service';
@@ -246,5 +247,140 @@ describe('WalletsService', () => {
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
     expect(prisma.tx.$executeRaw).toHaveBeenCalledTimes(1);
     expect(prisma.tx.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it('replays a wallet create request after its balance has changed without inserting twice', async () => {
+    const prisma = createPrismaMock();
+    const service = new WalletsService(
+      prisma as unknown as PrismaService,
+      {
+        normalizeCurrency: (value?: string | null) => value ?? 'VND',
+        convertAmount: jest
+          .fn()
+          .mockResolvedValue({ amount: 80, toCurrency: 'VND' }),
+      } as unknown as CurrencyService,
+    );
+    const hash = createHash('sha256')
+      .update(JSON.stringify(['QA', 'CASH', 'VND', '100.00']))
+      .digest('hex');
+    prisma.users.findUnique.mockResolvedValue({
+      id: 7,
+      role: 'PREMIUM',
+      currency_default: 'VND',
+    });
+    prisma.wallets.findFirst.mockResolvedValue({
+      id: 11,
+      user_id: 7,
+      name: 'QA',
+      wallet_type: 'CASH',
+      currency: 'VND',
+      balance: new Prisma.Decimal(80),
+      request_payload_hash: hash,
+      is_active: true,
+    });
+    prisma.$queryRaw.mockResolvedValue([
+      {
+        id: 11,
+        user_id: 7,
+        name: 'QA',
+        wallet_type: 'CASH',
+        currency: 'VND',
+        balance: new Prisma.Decimal(80),
+        is_active: true,
+        deleted_at: null,
+      },
+    ]);
+    const repeated = await service.create(7, {
+      name: 'QA',
+      wallet_type: 'CASH',
+      currency: 'VND',
+      balance: '100',
+      client_request_id: 'wallet_test_1',
+    });
+    expect(repeated.id).toBe(11);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    await expect(
+      service.create(7, {
+        name: 'QA',
+        wallet_type: 'CASH',
+        currency: 'VND',
+        balance: '101',
+        client_request_id: 'wallet_test_1',
+      }),
+    ).rejects.toThrow('Mã yêu cầu');
+  });
+
+  it('refuses a reviewed metadata edit when the server wallet changed', async () => {
+    const prisma = createPrismaMock();
+    const service = new WalletsService(
+      prisma as unknown as PrismaService,
+      {
+        normalizeCurrency: (value?: string | null) => value ?? 'VND',
+      } as CurrencyService,
+    );
+    const wallet = {
+      id: 3,
+      user_id: 7,
+      name: 'Cũ',
+      wallet_type: 'CASH',
+      currency: 'VND',
+      balance: new Prisma.Decimal(10),
+      is_active: true,
+      deleted_at: null,
+    };
+    prisma.$queryRaw.mockResolvedValue([wallet]);
+    prisma.users.findUnique.mockResolvedValue({
+      id: 7,
+      currency_default: 'VND',
+    });
+    prisma.wallets.findFirst.mockResolvedValue(null);
+    prisma.tx.$queryRaw.mockResolvedValue([
+      { ...wallet, name: 'Đổi trên server' },
+    ]);
+    await expect(
+      service.update(7, 3, {
+        name: 'Tên trên máy',
+        offline_expected: {
+          name: 'Cũ',
+          wallet_type: 'CASH',
+          currency: 'VND',
+          balance: '10',
+        },
+      }),
+    ).rejects.toThrow('đối chiếu');
+    expect(prisma.tx.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('refuses an offline delete after the server balance changed', async () => {
+    const prisma = createPrismaMock();
+    const service = new WalletsService(
+      prisma as unknown as PrismaService,
+      {
+        normalizeCurrency: (value?: string | null) => value ?? 'VND',
+      } as CurrencyService,
+    );
+    const wallet = {
+      id: 3,
+      user_id: 7,
+      name: 'QA',
+      wallet_type: 'CASH',
+      currency: 'VND',
+      balance: new Prisma.Decimal(10),
+      is_active: true,
+      deleted_at: null,
+    };
+    prisma.$queryRaw.mockResolvedValue([wallet]);
+    prisma.tx.$queryRaw.mockResolvedValue([
+      { ...wallet, balance: new Prisma.Decimal(11) },
+    ]);
+    await expect(
+      service.remove(7, 3, {
+        name: 'QA',
+        wallet_type: 'CASH',
+        currency: 'VND',
+        balance: '10',
+      }),
+    ).rejects.toThrow('đối chiếu');
+    expect(prisma.tx.$executeRaw).not.toHaveBeenCalled();
   });
 });
