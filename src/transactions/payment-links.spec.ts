@@ -40,32 +40,40 @@ describe('linked payment verification', () => {
     ).toBe('safe');
     expect(service.linkedPayments).toHaveBeenCalledWith(44, [3, 12]);
   });
-  it('uses one parameterized owner-scoped query and a minimal payload without filtering changed sources', async () => {
-    const query = jest.fn().mockResolvedValue([
-      {
-        id: 3,
-        wallet_id: 2,
-        amount: new Prisma.Decimal('260000'),
-        currency: 'VND',
-        transaction_date: new Date('2026-10-29T00:00:00Z'),
-        note: 'Đã sửa sang thu',
-        category_id: 5,
-        category_name: 'Vay',
-        category_type: 'INCOME',
-        cash_flow_group: 'LOAN_DEBT',
-      },
-    ]);
+  it('loads owner-scoped payments and tags only for transactions returned by that query', async () => {
+    const query = jest
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          id: 3,
+          wallet_id: 2,
+          amount: new Prisma.Decimal('260000'),
+          currency: 'VND',
+          transaction_date: new Date('2026-10-29T00:00:00Z'),
+          note: 'Đã sửa sang thu',
+          receipt_image: null,
+          receipt_items: null,
+          category_id: 5,
+          category_name: 'Vay',
+          category_type: 'INCOME',
+          cash_flow_group: 'LOAN_DEBT',
+        },
+      ])
+      .mockResolvedValueOnce([{ transaction_id: 3, name: 'Gia đình' }]);
     const service = new TransactionsService(
       { $queryRaw: query } as unknown as PrismaService,
       {} as CurrencyService,
       {} as NotificationsService,
     );
     const result = await service.linkedPayments(44, [3, 12]);
-    expect(query).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(2);
     const sql = query.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
     expect(sql[0].join('?')).toContain('WHERE w.user_id = ? AND t.id IN (?)');
     expect(sql[1]).toBe(44);
     expect((sql[2] as Prisma.Sql).values).toEqual([3, 12]);
+    const tagSql = query.mock.calls[1] as [TemplateStringsArray, ...unknown[]];
+    expect(tagSql[0].join('?')).toContain('WHERE tt.transaction_id IN (?)');
+    expect((tagSql[1] as Prisma.Sql).values).toEqual([3]);
     expect(result.requestedIds).toEqual([3, 12]);
     expect(result.missingIds).toEqual([12]);
     expect(result.data[0]).toMatchObject({
@@ -75,8 +83,11 @@ describe('linked payment verification', () => {
       transaction_date: '2026-10-29T00:00:00.000Z',
       category: { cash_flow_group: 'LOAN_DEBT' },
     });
-    expect(result.data[0]).not.toHaveProperty('receipt_image');
-    expect(result.data[0]).not.toHaveProperty('tags');
+    expect(result.data[0]).toMatchObject({
+      receipt_image: null,
+      receipt_items: null,
+      tags: ['Gia đình'],
+    });
   });
   it('returns indistinguishable missing IDs when no accessible transactions exist', async () => {
     const service = new TransactionsService(

@@ -82,24 +82,27 @@ model transactions {
 }
 
 model budgets {
-  id           Int           @id @default(autoincrement())
-  user_id      Int
-  name         String        @db.VarChar(100)
-  wallet_id    Int
-  category_id  Int?
-  scope        budget_scope  @default(WALLET)
-  limit_amount Decimal       @db.Decimal(15, 2)
-  period       budget_period
-  start_date   DateTime      @db.DateTime(0)
-  end_date     DateTime      @db.DateTime(0)
-  is_active    Boolean?      @default(true)
-  deleted_at   DateTime?     @db.DateTime(0)
-  created_at   DateTime?     @default(now()) @db.Timestamp(0)
-  updated_at   DateTime?     @default(now()) @updatedAt @db.Timestamp(0)
-  user         users         @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "budgets_user_id_fkey")
-  wallet       wallets       @relation(fields: [wallet_id], references: [id], onDelete: Cascade, map: "budgets_wallet_id_fkey")
+  id                   Int           @id @default(autoincrement())
+  user_id              Int
+  client_request_id    String?       @db.VarChar(80)
+  request_payload_hash String?       @db.VarChar(64)
+  name                 String        @db.VarChar(100)
+  wallet_id            Int
+  category_id          Int?
+  scope                budget_scope  @default(WALLET)
+  limit_amount         Decimal       @db.Decimal(15, 2)
+  period               budget_period
+  start_date           DateTime      @db.DateTime(0)
+  end_date             DateTime      @db.DateTime(0)
+  is_active            Boolean?      @default(true)
+  deleted_at           DateTime?     @db.DateTime(0)
+  created_at           DateTime?     @default(now()) @db.Timestamp(0)
+  updated_at           DateTime?     @default(now()) @updatedAt @db.Timestamp(0)
+  user                 users         @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "budgets_user_id_fkey")
+  wallet               wallets       @relation(fields: [wallet_id], references: [id], onDelete: Cascade, map: "budgets_wallet_id_fkey")
 
   @@index([user_id], map: "budgets_user_id_idx")
+  @@unique([user_id, client_request_id], map: "budgets_user_request_key")
   @@index([wallet_id], map: "budgets_wallet_id_idx")
   @@index([category_id], map: "budgets_category_id_idx")
   @@index([wallet_id, start_date, end_date], map: "budgets_wallet_period_idx")

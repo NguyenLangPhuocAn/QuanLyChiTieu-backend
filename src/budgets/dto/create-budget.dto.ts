@@ -5,6 +5,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  MaxLength,
   Matches,
 } from 'class-validator';
 
@@ -52,4 +53,10 @@ export class CreateBudgetDto {
   @IsOptional()
   @IsDateString()
   end_date?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  @Matches(/^[a-zA-Z0-9_-]{8,80}$/)
+  client_request_id?: string;
 }

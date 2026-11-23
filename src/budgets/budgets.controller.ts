@@ -17,6 +17,7 @@ import { BudgetsService } from './budgets.service';
 import type { BudgetPeriodFilter } from './budgets.service';
 import { BudgetScope, CreateBudgetDto } from './dto/create-budget.dto';
 import { UpdateBudgetDto } from './dto/update-budget.dto';
+import { DeleteBudgetDto } from './dto/delete-budget.dto';
 
 type AuthenticatedRequest = Request & {
   user: {
@@ -116,7 +117,8 @@ export class BudgetsController {
   remove(
     @Req() req: AuthenticatedRequest,
     @Param('id', ParseIntPipe) id: number,
+    @Body() dto: DeleteBudgetDto,
   ) {
-    return this.budgetsService.remove(req.user.userId, id);
+    return this.budgetsService.remove(req.user.userId, id, dto);
   }
 }

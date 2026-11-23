@@ -1,5 +1,5 @@
-/* eslint-disable @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/unbound-method */
-import { BadRequestException } from '@nestjs/common';
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/unbound-method */
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { PrismaService } from '../prisma/prisma.service';
@@ -40,7 +40,9 @@ describe('BudgetsService scoped budgets', () => {
       },
       budgets: {
         create: jest.fn().mockResolvedValue({ id: 123 }),
+        findFirst: jest.fn().mockResolvedValue(null),
         update: jest.fn(),
+        updateMany: jest.fn(),
         delete: jest.fn(),
       },
       $queryRaw: jest.fn(),
@@ -710,5 +712,148 @@ describe('BudgetsService scoped budgets', () => {
       },
     });
     expect(prisma.budgets.delete as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it('returns the same budget when a create request is sent again', async () => {
+    const { prisma, service } = makeService();
+    const row = {
+      id: 123,
+      user_id: 1,
+      name: 'Ăn uống tháng 11',
+      scope: BudgetScope.WALLET,
+      wallet_id: wallet.id,
+      category_id: null,
+      limit_amount: new Prisma.Decimal(1500000),
+      period: BudgetPeriod.CUSTOM,
+      start_date: new Date('2026-11-01'),
+      end_date: new Date('2026-11-30T23:59:59'),
+    };
+    jest.spyOn(service as any, 'getOwnedWallet').mockResolvedValue(wallet);
+    jest
+      .spyOn(service as any, 'assertNoDuplicate')
+      .mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'findOwnedBudget').mockResolvedValue(row);
+    jest.spyOn(service as any, 'decorateBudget').mockResolvedValue({ id: 123 });
+    const dto = {
+      name: row.name,
+      scope: BudgetScope.WALLET,
+      wallet_id: wallet.id,
+      limit_amount: '1500000',
+      period: BudgetPeriod.CUSTOM,
+      start_date: '2026-11-01',
+      end_date: '2026-11-30',
+      client_request_id: 'budget_20261123_001',
+    };
+
+    await service.create(1, dto);
+    const data = (prisma.budgets.create as jest.Mock).mock.calls[0][0].data;
+    (prisma.budgets.findFirst as jest.Mock).mockResolvedValue({
+      id: 123,
+      request_payload_hash: data.request_payload_hash,
+      is_active: true,
+      deleted_at: null,
+    });
+
+    await expect(service.create(1, dto)).resolves.toEqual({ id: 123 });
+    expect(prisma.budgets.create as jest.Mock).toHaveBeenCalledTimes(1);
+    expect(data.client_request_id).toBe(dto.client_request_id);
+  });
+
+  it('rejects reusing a request key for a different budget', async () => {
+    const { prisma, service } = makeService();
+    jest.spyOn(service as any, 'getOwnedWallet').mockResolvedValue(wallet);
+    (prisma.budgets.findFirst as jest.Mock).mockResolvedValue({
+      id: 123,
+      request_payload_hash: 'different',
+      is_active: true,
+      deleted_at: null,
+    });
+
+    await expect(
+      service.create(1, {
+        name: 'Đi lại tháng 11',
+        scope: BudgetScope.WALLET,
+        wallet_id: wallet.id,
+        limit_amount: '500000',
+        period: BudgetPeriod.CUSTOM,
+        start_date: '2026-11-01',
+        end_date: '2026-11-30',
+        client_request_id: 'budget_20261123_001',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(prisma.budgets.create as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it('rejects an offline delete when the budget changes during confirmation', async () => {
+    const { prisma, service } = makeService();
+    const row = {
+      id: 123,
+      user_id: 1,
+      name: 'Ăn uống tháng 11',
+      scope: BudgetScope.WALLET,
+      wallet_id: wallet.id,
+      category_id: null,
+      limit_amount: new Prisma.Decimal(1500000),
+      period: BudgetPeriod.CUSTOM,
+      start_date: new Date('2026-11-01'),
+      end_date: new Date('2026-11-30T23:59:59'),
+    };
+    jest.spyOn(service as any, 'findOwnedBudget').mockResolvedValue(row);
+    (prisma.budgets.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+    const expected = {
+      name: row.name,
+      scope: row.scope,
+      wallet_id: row.wallet_id,
+      category_id: null,
+      limit_amount: '1500000',
+      period: row.period,
+      start_date: row.start_date.toISOString(),
+      end_date: row.end_date.toISOString(),
+    };
+
+    await expect(
+      service.remove(1, row.id, { offline_expected: expected }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(prisma.budgets.update as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it('rejects an offline update when the budget changes during confirmation', async () => {
+    const { prisma, service } = makeService();
+    const row = {
+      id: 123,
+      user_id: 1,
+      name: 'Ăn uống tháng 11',
+      scope: BudgetScope.WALLET,
+      wallet_id: wallet.id,
+      category_id: null,
+      limit_amount: new Prisma.Decimal(1500000),
+      period: BudgetPeriod.CUSTOM,
+      start_date: new Date('2026-11-01'),
+      end_date: new Date('2026-11-30T23:59:59'),
+    };
+    jest.spyOn(service as any, 'findOwnedBudget').mockResolvedValue(row);
+    jest.spyOn(service as any, 'getOwnedWallet').mockResolvedValue(wallet);
+    jest
+      .spyOn(service as any, 'assertNoDuplicate')
+      .mockResolvedValue(undefined);
+    (prisma.budgets.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+    const expected = {
+      name: row.name,
+      scope: row.scope,
+      wallet_id: row.wallet_id,
+      category_id: null,
+      limit_amount: '1500000',
+      period: row.period,
+      start_date: row.start_date.toISOString(),
+      end_date: row.end_date.toISOString(),
+    };
+
+    await expect(
+      service.update(1, row.id, {
+        name: 'Ăn uống gia đình tháng 11',
+        offline_expected: expected,
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(prisma.budgets.update as jest.Mock).not.toHaveBeenCalled();
   });
 });

@@ -1,8 +1,10 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { Prisma, categories_type } from '@prisma/client';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { isNormalCashFlow } from '../common/finance/cash-flow-classification';
@@ -13,6 +15,8 @@ import {
   CreateBudgetDto,
 } from './dto/create-budget.dto';
 import { UpdateBudgetDto } from './dto/update-budget.dto';
+import { BudgetExpectedDto } from './dto/budget-expected.dto';
+import { DeleteBudgetDto } from './dto/delete-budget.dto';
 
 type BudgetRow = {
   id: number;
@@ -528,6 +532,46 @@ export class BudgetsService {
     `;
 
     return rows[0] ?? null;
+  }
+
+  private budgetExpectedWhere(expected: BudgetExpectedDto) {
+    if (expected.category_id === undefined) {
+      throw new BadRequestException('Thiếu danh mục trong bản ngân sách gốc');
+    }
+    const startDate = new Date(expected.start_date);
+    const endDate = new Date(expected.end_date);
+    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+      throw new BadRequestException('Ngày của bản ngân sách gốc không hợp lệ');
+    }
+    return {
+      name: expected.name,
+      scope: expected.scope,
+      wallet_id: expected.wallet_id,
+      category_id: expected.category_id,
+      limit_amount: new Prisma.Decimal(expected.limit_amount),
+      period: expected.period,
+      start_date: startDate,
+      end_date: endDate,
+    };
+  }
+
+  private assertBudgetExpected(row: BudgetRow, expected: BudgetExpectedDto) {
+    const original = this.budgetExpectedWhere(expected);
+    if (
+      row.name !== original.name ||
+      row.scope !== original.scope ||
+      row.wallet_id !== original.wallet_id ||
+      row.category_id !== original.category_id ||
+      !row.limit_amount.equals(original.limit_amount) ||
+      row.period !== original.period ||
+      row.start_date.getTime() !== original.start_date.getTime() ||
+      row.end_date.getTime() !== original.end_date.getTime()
+    ) {
+      throw new ConflictException(
+        'Ngân sách trên máy chủ đã thay đổi. Hãy đối chiếu trước khi lưu.',
+      );
+    }
+    return original;
   }
 
   private async assertNoDuplicate(
@@ -1188,15 +1232,57 @@ export class BudgetsService {
       endDate: dto.end_date,
     });
 
-    await this.assertNoDuplicate(
-      userId,
-      scope,
-      dto.wallet_id,
-      categoryId,
-      dto.period,
-      startDate,
-      endDate,
-    );
+    const requestHash = dto.client_request_id
+      ? createHash('sha256')
+          .update(
+            JSON.stringify([
+              name,
+              scope,
+              dto.wallet_id,
+              categoryId,
+              limitAmount.toFixed(2),
+              dto.period,
+              startDate.toISOString(),
+              endDate.toISOString(),
+            ]),
+          )
+          .digest('hex')
+      : null;
+    const findPreviousRequest = async () => {
+      if (!dto.client_request_id) return null;
+      const previous = await this.prisma.budgets.findFirst({
+        where: { user_id: userId, client_request_id: dto.client_request_id },
+      });
+      if (!previous) return null;
+      if (
+        previous.request_payload_hash !== requestHash ||
+        previous.is_active === false ||
+        previous.deleted_at
+      )
+        throw new ConflictException(
+          'Mã yêu cầu đã dùng cho ngân sách khác. Hãy đối chiếu trước khi gửi lại.',
+        );
+      const row = await this.findOwnedBudget(userId, previous.id);
+      return row ? this.decorateBudget(row) : null;
+    };
+    const previous = await findPreviousRequest();
+    if (previous) return previous;
+
+    try {
+      await this.assertNoDuplicate(
+        userId,
+        scope,
+        dto.wallet_id,
+        categoryId,
+        dto.period,
+        startDate,
+        endDate,
+      );
+    } catch (error) {
+      const repeated = await findPreviousRequest();
+      if (repeated) return repeated;
+      throw error;
+    }
 
     const warning =
       scope === BudgetScope.CATEGORY
@@ -1213,6 +1299,12 @@ export class BudgetsService {
       .create({
         data: {
           user_id: userId,
+          ...(dto.client_request_id
+            ? {
+                client_request_id: dto.client_request_id,
+                request_payload_hash: requestHash,
+              }
+            : {}),
           name,
           wallet_id: dto.wallet_id,
           category_id: categoryId,
@@ -1224,8 +1316,10 @@ export class BudgetsService {
         },
         select: { id: true },
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         if (this.isDuplicateBudgetWriteError(error)) {
+          const repeated = await findPreviousRequest();
+          if (repeated) return { id: repeated.id };
           this.throwDuplicateBudget();
         }
 
@@ -1246,6 +1340,10 @@ export class BudgetsService {
     if (!current) {
       throw new NotFoundException('Không tìm thấy ngân sách');
     }
+
+    const expected = dto.offline_expected
+      ? this.assertBudgetExpected(current, dto.offline_expected)
+      : null;
 
     const nextName =
       dto.name !== undefined
@@ -1307,27 +1405,38 @@ export class BudgetsService {
           )
         : null;
 
-    await this.prisma.budgets
-      .update({
-        where: { id },
-        data: {
-          name: nextName,
-          wallet_id: nextWalletId,
-          category_id: categoryId,
-          scope,
-          limit_amount: limitAmount,
-          period: nextPeriod,
-          start_date: startDate,
-          end_date: endDate,
-        },
-      })
-      .catch((error: unknown) => {
-        if (this.isDuplicateBudgetWriteError(error)) {
-          this.throwDuplicateBudget();
+    const updateData = {
+      name: nextName,
+      wallet_id: nextWalletId,
+      category_id: categoryId,
+      scope,
+      limit_amount: limitAmount,
+      period: nextPeriod,
+      start_date: startDate,
+      end_date: endDate,
+    };
+    const write = async () => {
+      if (expected) {
+        const result = await this.prisma.budgets.updateMany({
+          where: { id, user_id: userId, ...expected, deleted_at: null },
+          data: updateData,
+        });
+        if (result.count !== 1) {
+          throw new ConflictException(
+            'Ngân sách trên máy chủ đã thay đổi. Hãy đối chiếu trước khi lưu.',
+          );
         }
+      } else {
+        await this.prisma.budgets.update({ where: { id }, data: updateData });
+      }
+    };
+    await write().catch((error: unknown) => {
+      if (this.isDuplicateBudgetWriteError(error)) {
+        this.throwDuplicateBudget();
+      }
 
-        throw error;
-      });
+      throw error;
+    });
 
     const updatedBudget = await this.findOwnedBudget(userId, id);
     if (!updatedBudget) {
@@ -1437,20 +1546,34 @@ export class BudgetsService {
     };
   }
 
-  async remove(userId: number, id: number) {
+  async remove(userId: number, id: number, dto?: DeleteBudgetDto) {
     const current = await this.findOwnedBudget(userId, id);
 
     if (!current) {
       throw new NotFoundException('Không tìm thấy ngân sách');
     }
 
-    await this.prisma.budgets.update({
-      where: { id },
-      data: {
-        is_active: false,
-        deleted_at: new Date(),
-      },
-    });
+    const expected = dto?.offline_expected
+      ? this.assertBudgetExpected(current, dto.offline_expected)
+      : null;
+
+    const deleteData = {
+      is_active: false,
+      deleted_at: new Date(),
+    };
+    if (expected) {
+      const result = await this.prisma.budgets.updateMany({
+        where: { id, user_id: userId, ...expected, deleted_at: null },
+        data: deleteData,
+      });
+      if (result.count !== 1) {
+        throw new ConflictException(
+          'Ngân sách trên máy chủ đã thay đổi. Hãy đối chiếu trước khi xóa.',
+        );
+      }
+    } else {
+      await this.prisma.budgets.update({ where: { id }, data: deleteData });
+    }
 
     return this.decorateBudget(current);
   }

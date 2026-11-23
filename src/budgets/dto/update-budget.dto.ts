@@ -5,8 +5,11 @@ import {
   IsOptional,
   IsString,
   Matches,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import { BudgetPeriod, BudgetScope } from './create-budget.dto';
+import { BudgetExpectedDto } from './budget-expected.dto';
 
 export class UpdateBudgetDto {
   @IsOptional()
@@ -42,4 +45,9 @@ export class UpdateBudgetDto {
   @IsOptional()
   @IsDateString()
   end_date?: string;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => BudgetExpectedDto)
+  offline_expected?: BudgetExpectedDto;
 }
