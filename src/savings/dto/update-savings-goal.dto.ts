@@ -4,11 +4,18 @@ import {
   IsString,
   MaxLength,
   Matches,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
+import { SavingsGoalExpectedDto } from './savings-goal-expected.dto';
 
 const POSITIVE_MONEY = /^(?!0+(?:\.0{1,2})?$)\d+(?:\.\d{1,2})?$/;
 
 export class UpdateSavingsGoalDto {
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SavingsGoalExpectedDto)
+  offline_expected?: SavingsGoalExpectedDto;
   @IsOptional()
   @IsString({ message: 'Tên mục tiêu phải là chữ.' })
   @MaxLength(100, { message: 'Tên mục tiêu không được vượt quá 100 ký tự.' })

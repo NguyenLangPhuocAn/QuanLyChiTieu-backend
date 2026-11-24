@@ -1,3 +1,4 @@
+import 'reflect-metadata';
 import { validate } from 'class-validator';
 import { UpdateSavingsGoalDto } from './update-savings-goal.dto';
 import { CreateWalletTransferDto } from './create-wallet-transfer.dto';

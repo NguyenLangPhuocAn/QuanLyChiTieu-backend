@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -13,6 +14,7 @@ import {
   WithdrawSavingsDto,
 } from './dto/savings-entry.dto';
 import { UpdateSavingsGoalDto } from './dto/update-savings-goal.dto';
+import { SavingsGoalExpectedDto } from './dto/savings-goal-expected.dto';
 import { buildSavingsRoadmap } from './savings-roadmap';
 
 type PrismaClientLike = PrismaService | Prisma.TransactionClient;
@@ -426,8 +428,46 @@ export class SavingsService {
     return this.findOne(userId, goalId);
   }
 
+  private savingsGoalExpectedWhere(
+    goal: GoalWithDetails,
+    expected: SavingsGoalExpectedDto,
+  ) {
+    if (
+      !Object.prototype.hasOwnProperty.call(expected, 'target_date') ||
+      !Object.prototype.hasOwnProperty.call(expected, 'note') ||
+      typeof expected.name !== 'string' ||
+      typeof expected.target_amount !== 'string'
+    )
+      throw new BadRequestException('Bản mục tiêu gốc chưa đầy đủ');
+    const amount = this.money(expected.target_amount, 'Số tiền mục tiêu gốc');
+    const date = expected.target_date ? new Date(expected.target_date) : null;
+    if (date && Number.isNaN(date.getTime()))
+      throw new BadRequestException('Ngày của bản mục tiêu gốc không hợp lệ');
+    const original = {
+      name: expected.name,
+      target_amount: amount,
+      target_date: date,
+      note: expected.note,
+      status: expected.status,
+    };
+    if (
+      goal.name !== original.name ||
+      !goal.target_amount.equals(original.target_amount) ||
+      goal.target_date?.getTime() !== original.target_date?.getTime() ||
+      goal.note !== original.note ||
+      goal.status !== original.status
+    )
+      throw new ConflictException(
+        'Mục tiêu trên máy chủ đã thay đổi. Hãy đối chiếu trước khi lưu.',
+      );
+    return original;
+  }
+
   async updateGoal(userId: number, goalId: number, dto: UpdateSavingsGoalDto) {
     const goal = await this.ownedGoal(this.prisma, userId, goalId);
+    const expected = dto.offline_expected
+      ? this.savingsGoalExpectedWhere(goal, dto.offline_expected)
+      : null;
     const name = dto.name?.trim();
     if (dto.name !== undefined && !name) {
       throw new BadRequestException('Tên mục tiêu không được để trống');
@@ -451,19 +491,33 @@ export class SavingsService {
     }
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.savings_goals.update({
-        where: { id: goalId },
-        data: {
-          ...(name !== undefined ? { name } : {}),
-          ...(target !== undefined ? { target_amount: target } : {}),
-          ...(dto.target_date !== undefined
-            ? {
-                target_date: dto.target_date ? new Date(dto.target_date) : null,
-              }
-            : {}),
-          ...(dto.note !== undefined ? { note: dto.note?.trim() || null } : {}),
-        },
-      });
+      const data = {
+        ...(name !== undefined ? { name } : {}),
+        ...(target !== undefined ? { target_amount: target } : {}),
+        ...(dto.target_date !== undefined
+          ? {
+              target_date: dto.target_date ? new Date(dto.target_date) : null,
+            }
+          : {}),
+        ...(dto.note !== undefined ? { note: dto.note?.trim() || null } : {}),
+      };
+      if (expected) {
+        const result = await tx.savings_goals.updateMany({
+          where: {
+            id: goalId,
+            user_id: userId,
+            deleted_at: null,
+            ...expected,
+          },
+          data,
+        });
+        if (result.count !== 1)
+          throw new ConflictException(
+            'Mục tiêu trên máy chủ đã thay đổi. Hãy đối chiếu trước khi lưu.',
+          );
+      } else {
+        await tx.savings_goals.update({ where: { id: goalId }, data });
+      }
       if (name !== undefined) {
         await tx.wallets.update({
           where: { id: goal.wallet_id },
