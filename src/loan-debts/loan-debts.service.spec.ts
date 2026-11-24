@@ -471,4 +471,99 @@ describe('LoanDebtsService', () => {
     });
     expect(tx.transactions.update).not.toHaveBeenCalled();
   });
+
+  const expectedLoan = {
+    person_name: 'Người cho vay',
+    principal_amount: '100000',
+    opening_wallet_id: 10,
+    type: LoanDebtType.BORROWED,
+    due_date: null,
+    note: null,
+    settled_amount: '20000',
+  };
+  const originalLoan = {
+    id: 301,
+    user_id: 1,
+    person_name: 'Người cho vay',
+    type: LoanDebtType.BORROWED,
+    principal_amount: new Prisma.Decimal(100000),
+    currency: 'VND',
+    note: null,
+    due_date: null,
+    opening_wallet_id: 10,
+    opening_transaction_id: 201,
+    status: 'OPEN',
+    deleted_at: null,
+  };
+
+  it('rejects an offline name edit if the server name changed', async () => {
+    const { service, prisma, tx } = makeService();
+    (prisma.loan_debts.findFirst as jest.Mock).mockResolvedValue({
+      ...originalLoan,
+      person_name: 'Tên đã sửa',
+    });
+    (prisma.loan_debt_payments.aggregate as jest.Mock).mockResolvedValue({
+      _sum: { amount: new Prisma.Decimal(20000) },
+    });
+    await expect(
+      service.update(1, 301, {
+        person_name: 'Tên mới',
+        offline_expected: expectedLoan,
+      }),
+    ).rejects.toThrow('đã thay đổi');
+    expect(tx.loan_debts.update).not.toHaveBeenCalled();
+    expect(tx.transactions.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects an offline edit if a payment changed while waiting for the lock', async () => {
+    const { service, prisma, tx } = makeService();
+    (prisma.loan_debts.findFirst as jest.Mock).mockResolvedValue(originalLoan);
+    (prisma.loan_debt_payments.aggregate as jest.Mock).mockResolvedValue({
+      _sum: { amount: new Prisma.Decimal(20000) },
+    });
+    tx.loan_debt_payments.aggregate.mockResolvedValue({
+      _sum: { amount: new Prisma.Decimal(30000) },
+    });
+    await expect(
+      service.update(1, 301, {
+        due_date: '2026-12-01',
+        offline_expected: expectedLoan,
+      }),
+    ).rejects.toThrow('đã thay đổi');
+    expect(tx.loan_debts.update).not.toHaveBeenCalled();
+  });
+
+  it('updates metadata without changing balances when the reviewed copy matches', async () => {
+    const { service, prisma, tx } = makeService();
+    (prisma.loan_debts.findFirst as jest.Mock).mockResolvedValue(originalLoan);
+    (prisma.loan_debt_payments.aggregate as jest.Mock).mockResolvedValue({
+      _sum: { amount: new Prisma.Decimal(20000) },
+    });
+    jest.spyOn(service, 'findOne').mockResolvedValue({ id: 301 } as never);
+    await service.update(1, 301, {
+      person_name: 'Tên mới',
+      due_date: '2026-12-01',
+      offline_expected: expectedLoan,
+    });
+    expect(tx.loan_debts.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          person_name: 'Tên mới',
+          due_date: new Date('2026-12-01T00:00:00.000Z'),
+        }),
+      }),
+    );
+    expect(tx.wallets.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses amount or wallet changes through the offline metadata route', async () => {
+    const { service, tx } = makeService();
+    await expect(
+      service.update(1, 301, {
+        principal_amount: '150000',
+        offline_expected: expectedLoan,
+      }),
+    ).rejects.toThrow('chỉ nhận tên người');
+    expect(tx.wallets.updateMany).not.toHaveBeenCalled();
+  });
 });

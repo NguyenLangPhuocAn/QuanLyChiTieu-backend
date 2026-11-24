@@ -502,6 +502,14 @@ export class LoanDebtsService {
   }
 
   async update(userId: number, id: number, dto: UpdateLoanDebtDto) {
+    if (
+      dto.offline_expected &&
+      (dto.principal_amount !== undefined || dto.wallet_id !== undefined)
+    ) {
+      throw new BadRequestException(
+        'Bản sửa ngoại tuyến chỉ nhận tên người, ngày hẹn và ghi chú',
+      );
+    }
     const record = await this.rawRecord(userId, id);
     const settled = await this.settledAmount(id);
     const nextPersonName = dto.person_name?.trim();
@@ -538,7 +546,37 @@ export class LoanDebtsService {
         : null;
 
     await this.prisma.$transaction(async (tx) => {
-      await this.lockRecord(tx, userId, id, record);
+      const current = await this.lockRecord(tx, userId, id, record);
+      if (dto.offline_expected) {
+        const expected = dto.offline_expected;
+        if (
+          !Object.prototype.hasOwnProperty.call(expected, 'due_date') ||
+          !Object.prototype.hasOwnProperty.call(expected, 'note') ||
+          typeof expected.person_name !== 'string' ||
+          typeof expected.principal_amount !== 'string' ||
+          typeof expected.settled_amount !== 'string' ||
+          !Number.isSafeInteger(expected.opening_wallet_id)
+        )
+          throw new BadRequestException('Bản khoản vay/nợ gốc chưa đầy đủ');
+        const expectedDate = this.parseDate(expected.due_date);
+        const expectedPrincipal = this.positiveAmount(
+          expected.principal_amount,
+        );
+        const expectedSettled = new Prisma.Decimal(expected.settled_amount);
+        const settledNow = await this.settledAmount(id, tx);
+        if (
+          current.person_name !== expected.person_name ||
+          !current.principal_amount.equals(expectedPrincipal) ||
+          current.opening_wallet_id !== expected.opening_wallet_id ||
+          current.type !== expected.type ||
+          current.due_date?.getTime() !== expectedDate?.getTime() ||
+          current.note !== expected.note ||
+          !settledNow.equals(expectedSettled)
+        )
+          throw new ConflictException(
+            'Khoản vay/nợ trên máy chủ đã thay đổi. Hãy đối chiếu trước khi lưu.',
+          );
+      }
       if (
         (dto.principal_amount || dto.wallet_id) &&
         (await this.settledAmount(id, tx)).greaterThan(0)

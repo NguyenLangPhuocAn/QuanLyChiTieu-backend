@@ -7,8 +7,15 @@ import {
   Matches,
   MaxLength,
 } from 'class-validator';
+import { Type } from 'class-transformer';
+import { ValidateNested } from 'class-validator';
+import { LoanDebtExpectedDto } from './loan-debt-expected.dto';
 
 export class UpdateLoanDebtDto {
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoanDebtExpectedDto)
+  offline_expected?: LoanDebtExpectedDto;
   @IsOptional()
   @IsString({ message: 'Tên người phải là chữ.' })
   @IsNotEmpty({ message: 'Vui lòng nhập tên người.' })
